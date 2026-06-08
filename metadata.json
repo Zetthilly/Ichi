@@ -1,0 +1,6 @@
+{
+  "name": "HZ Chord AI",
+  "description": "Offline AI-powered music analysis, stem separation, transcription, chord and arpeggio recognition, guitar tuner and audio production suite.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
