@@ -54,6 +54,7 @@ android {
   buildFeatures {
     compose = true
     buildConfig = true
+    prefab = true
   }
   testOptions { unitTests { isIncludeAndroidResources = true } }
 }
@@ -118,4 +119,16 @@ dependencies {
   debugImplementation(libs.androidx.compose.ui.tooling)
   "ksp"(libs.androidx.room.compiler)
   "ksp"(libs.moshi.kotlin.codegen)
+
+  // Advanced Audio Workstation DSP & Neural Extensions
+  // Prefabricated C++ / Native audio engine bindings (Uncomment for local Android Studio development)
+  // implementation(libs.oboe)
+  // implementation(libs.onnxruntime.android)
+  
+  // Dependency injection, room & multimedia framework components
+  implementation(libs.hilt.android)
+  "ksp"(libs.hilt.compiler)
+  implementation(libs.media3.exoplayer)
+  implementation(libs.media3.ui)
+  implementation(libs.media3.session)
 }

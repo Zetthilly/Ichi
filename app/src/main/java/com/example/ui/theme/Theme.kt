@@ -6,18 +6,18 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
 
 private val DarkColorScheme = darkColorScheme(
-    primary = ElectricBlue,
-    secondary = GoldAccent,
-    tertiary = SilverGray,
-    background = DeepNavy,
-    surface = SurfaceDark,
+    primary = ElectricBlue,         // Electric Blue (#00B7FF)
+    secondary = RoyalGold,          // Royal Gold (#FFD54A)
+    tertiary = CosmicPurple,        // Cosmic Purple (#6D4CFF)
+    background = DeepNavy,          // Deep Navy (#030A16)
+    surface = MidnightSlate,        // Midnight Slate (#0D1726)
     onPrimary = Color.Black,
     onSecondary = Color.Black,
     onTertiary = Color.White,
-    onBackground = GlowingWhite,
-    onSurface = GlowingWhite,
+    onBackground = TextSilver,      // Text Silver (#C9D1D9)
+    onSurface = TextSilver,         // Text Silver (#C9D1D9)
     surfaceVariant = SurfaceCard,
-    outline = BorderCyan
+    outline = NeonCyan              // Neon Cyan (#00F0FF)
 )
 
 @Composable

@@ -22,6 +22,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
@@ -43,6 +44,9 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import android.provider.OpenableColumns
 import android.net.Uri
+import android.app.Activity
+import com.example.util.AudioPermissionHelper
+import com.example.util.AudioPermissionRationaleDialog
 import com.example.audio.DetectedChordInfo
 import com.example.audio.StemSeparationState
 import com.example.data.ProjectSession
@@ -3829,14 +3833,53 @@ fun StudioAudioSeparationTab(viewModel: WorkstationViewModel) {
 
 @Composable
 fun MixerFaderRow(label: String, volume: Float, onVolumeChange: (Float) -> Unit, onMuteToggle: () -> Unit) {
+    val isEnabled = volume > 0.01f
     Column(modifier = Modifier.padding(vertical = 4.dp)) {
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text(text = label, fontSize = 11.sp, color = Color.White, fontWeight = FontWeight.Bold)
-            Text(text = String.format("%.0f%%", volume * 100), fontSize = 11.sp, color = Color(0xFF00E5FF), fontWeight = FontWeight.Bold)
+            Text(
+                text = label,
+                fontSize = 11.sp,
+                color = if (isEnabled) Color.White else Color(0xFF64748B),
+                fontWeight = FontWeight.Bold
+            )
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text(
+                    text = String.format("%.0f%%", volume * 100),
+                    fontSize = 11.sp,
+                    color = if (isEnabled) Color(0xFF00E5FF) else Color(0xFF64748B),
+                    fontWeight = FontWeight.Bold
+                )
+                Switch(
+                    checked = isEnabled,
+                    onCheckedChange = { checked ->
+                        if (checked) {
+                            if (volume <= 0.01f) {
+                                onMuteToggle()
+                            }
+                        } else {
+                            if (volume > 0.01f) {
+                                onMuteToggle()
+                            }
+                        }
+                    },
+                    colors = SwitchDefaults.colors(
+                        checkedThumbColor = Color(0xFF00E5FF),
+                        checkedTrackColor = Color(0xFF13233C),
+                        uncheckedThumbColor = Color(0xFF94A3B8),
+                        uncheckedTrackColor = Color(0xFF0F172A)
+                    ),
+                    modifier = Modifier
+                        .scale(0.7f)
+                        .testTag("switch_${label.lowercase().replace("/", "").replace(" ", "_")}")
+                )
+            }
         }
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -3846,9 +3889,10 @@ fun MixerFaderRow(label: String, volume: Float, onVolumeChange: (Float) -> Unit,
             Slider(
                 value = volume,
                 onValueChange = onVolumeChange,
+                enabled = isEnabled,
                 colors = SliderDefaults.colors(
-                    thumbColor = Color(0xFF00E5FF),
-                    activeTrackColor = Color(0xFF00E5FF),
+                    thumbColor = if (isEnabled) Color(0xFF00E5FF) else Color(0xFF475569),
+                    activeTrackColor = if (isEnabled) Color(0xFF00E5FF) else Color(0xFF334155),
                     inactiveTrackColor = Color(0xFF132F52)
                 ),
                 modifier = Modifier.weight(1f)
@@ -4364,6 +4408,24 @@ fun AudioRecorderDialog(
     var sessionTitle by remember { mutableStateOf("New Studio Recording") }
     var keySignature by remember { mutableStateOf("C Major") }
 
+    val context = LocalContext.current
+    val activity = context as? Activity
+    var showRationale by remember { mutableStateOf(false) }
+    var isPermanentlyDenied by remember { mutableStateOf(false) }
+
+    val permissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { isGranted ->
+        if (isGranted) {
+            viewModel.engine.toggleRecording()
+        } else {
+            if (activity != null && !AudioPermissionHelper.shouldShowPermissionRationale(activity)) {
+                isPermanentlyDenied = true
+            }
+            showRationale = true
+        }
+    }
+
     Dialog(onDismissRequest = onDismiss) {
         Card(
             colors = CardDefaults.cardColors(containerColor = Color(0xFF0C1424)),
@@ -4448,7 +4510,22 @@ fun AudioRecorderDialog(
                     horizontalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
                     Button(
-                        onClick = { viewModel.engine.toggleRecording() },
+                        onClick = {
+                            if (isRec) {
+                                viewModel.engine.toggleRecording()
+                            } else {
+                                if (AudioPermissionHelper.hasRecordAudioPermission(context)) {
+                                    viewModel.engine.toggleRecording()
+                                } else {
+                                    if (activity != null && AudioPermissionHelper.shouldShowPermissionRationale(activity)) {
+                                        isPermanentlyDenied = false
+                                        showRationale = true
+                                    } else {
+                                        permissionLauncher.launch(AudioPermissionHelper.RECORD_AUDIO_PERMISSION)
+                                    }
+                                }
+                            }
+                        },
                         colors = ButtonDefaults.buttonColors(
                             containerColor = if (isRec) Color(0xFFEF5350) else Color(0xFF4CAF50)
                         ),
@@ -4485,6 +4562,21 @@ fun AudioRecorderDialog(
                 }
             }
         }
+    }
+
+    if (showRationale) {
+        AudioPermissionRationaleDialog(
+            onDismiss = { showRationale = false },
+            onRequestPermission = {
+                showRationale = false
+                permissionLauncher.launch(AudioPermissionHelper.RECORD_AUDIO_PERMISSION)
+            },
+            onOpenSettings = {
+                showRationale = false
+                AudioPermissionHelper.launchAppSettings(context)
+            },
+            isPermanentlyDenied = isPermanentlyDenied
+        )
     }
 }
 
