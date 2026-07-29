@@ -22,12 +22,38 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import java.io.File
 
+data class TrackChordEntry(
+    val id: String = java.util.UUID.randomUUID().toString(),
+    val timeMs: Long,
+    val timestampLabel: String,
+    val chordSymbol: String,
+    val chordName: String,
+    val root: String,
+    val type: String,
+    val notes: List<String>,
+    val confidence: Float,
+    val frequency: Float,
+    val formula: String
+)
+
 class WorkstationViewModel(application: Application) : AndroidViewModel(application) {
 
     private val database = AppDatabase.getDatabase(application)
     private val repository = MusicWorkstationRepository(database.workstationDao())
     val engine = AudioWorkstationEngine()
     private val sharedPrefs = application.getSharedPreferences("hz_audio_workstation_prefs", android.content.Context.MODE_PRIVATE)
+
+    // Jetpack DataStore Repository for User Preferences & Module States
+    val userPreferencesRepository = UserPreferencesRepository(application)
+    val userPreferences: StateFlow<UserPreferences> = userPreferencesRepository.userPreferencesFlow
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.Eagerly,
+            initialValue = UserPreferences()
+        )
+
+    private val _trackChordTimeline = MutableStateFlow<List<TrackChordEntry>>(emptyList())
+    val trackChordTimeline: StateFlow<List<TrackChordEntry>> = _trackChordTimeline.asStateFlow()
 
     // Database flows exposed using stateIn
     val allSessions: StateFlow<List<ProjectSession>> = repository.allSessions
@@ -81,6 +107,79 @@ class WorkstationViewModel(application: Application) : AndroidViewModel(applicat
     private val _globalKeySignature = MutableStateFlow<String?>(null)
     val globalKeySignature: StateFlow<String?> = _globalKeySignature.asStateFlow()
 
+    // Harmonic Reconstruction Engine & Accurate Note Preservation States
+    private val _showHarmonicClassification = MutableStateFlow(true)
+    val showHarmonicClassification: StateFlow<Boolean> = _showHarmonicClassification.asStateFlow()
+
+    private val _performanceNoteStream = MutableStateFlow<List<DetectedPerformanceNote>>(emptyList())
+    val performanceNoteStream: StateFlow<List<DetectedPerformanceNote>> = _performanceNoteStream.asStateFlow()
+
+    private val _activePerformanceNotes = MutableStateFlow<List<DetectedPerformanceNote>>(emptyList())
+    val activePerformanceNotes: StateFlow<List<DetectedPerformanceNote>> = _activePerformanceNotes.asStateFlow()
+
+    fun toggleHarmonicClassification() {
+        val next = !_showHarmonicClassification.value
+        _showHarmonicClassification.value = next
+        sharedPrefs.edit().putBoolean("show_harmonic_classification", next).apply()
+    }
+
+    fun feedPerformanceNotes(rawNotes: List<String>, parentChord: String = currentChord.value?.name ?: "C") {
+        if (rawNotes.isEmpty()) return
+        val currentTimestamp = System.currentTimeMillis()
+        val classified = HarmonicReconstructionEngine.processAndClassifyNotes(
+            rawNotes = rawNotes,
+            parentChordSymbol = parentChord,
+            keySignature = _globalKeySignature.value ?: "C Major",
+            baseTimestampMs = currentTimestamp
+        )
+
+        _activePerformanceNotes.value = classified
+
+        val updatedStream = (_performanceNoteStream.value + classified).takeLast(40)
+        _performanceNoteStream.value = updatedStream
+
+        // Pass raw notes to engine buffer without filtering
+        val notesString = rawNotes.joinToString(" ")
+        engine.tapLiveMusicalNote(notesString)
+    }
+
+    fun triggerExampleSequence(sequenceType: String) {
+        viewModelScope.launch {
+            when (sequenceType) {
+                "F#_G_G#_A" -> {
+                    // F# -> G (passing) -> G# (chromatic) -> A
+                    val rawSequence = listOf("F#", "G", "G#", "A")
+                    feedPerformanceNotes(rawSequence, "F# Major")
+                }
+                "A_Bb_B_C" -> {
+                    // A -> Bb (chromatic) -> B -> C
+                    val rawSequence = listOf("A", "Bb", "B", "C")
+                    feedPerformanceNotes(rawSequence, "Am")
+                }
+                "GRACE_NOTE_DEMO" -> {
+                    // Grace note G# preceding main note A
+                    val rawSequence = listOf("G#grace", "A", "C#", "E")
+                    feedPerformanceNotes(rawSequence, "A Major")
+                }
+                "GHOST_NOTE_DEMO" -> {
+                    // Ghost note D preceding main chord G
+                    val rawSequence = listOf("(D)ghost", "G", "B", "D")
+                    feedPerformanceNotes(rawSequence, "G Major")
+                }
+                else -> {
+                    val rawSequence = listOf("C", "E", "G", "B")
+                    feedPerformanceNotes(rawSequence, "Cmaj7")
+                }
+            }
+        }
+    }
+
+    fun clearPerformanceNotes() {
+        _performanceNoteStream.value = emptyList()
+        _activePerformanceNotes.value = emptyList()
+        engine.clearLiveNotes()
+    }
+
     private val _isAnalyzingKey = MutableStateFlow(false)
     val isAnalyzingKey: StateFlow<Boolean> = _isAnalyzingKey.asStateFlow()
 
@@ -90,11 +189,116 @@ class WorkstationViewModel(application: Application) : AndroidViewModel(applicat
     private val _keyAnalysisLogs = MutableStateFlow<List<String>>(emptyList())
     val keyAnalysisLogs: StateFlow<List<String>> = _keyAnalysisLogs.asStateFlow()
 
+    // Universal Audio Sharing Engine™ State & Controls
+    val universalAudioSharingState: StateFlow<UniversalAudioSharingState> = engine.sharingState
+
+    fun toggleSharingModuleBypass(moduleId: String) {
+        engine.toggleSharingModuleBypass(moduleId)
+    }
+
+    fun setSharingModuleGain(moduleId: String, gainDb: Float) {
+        engine.setSharingModuleGain(moduleId, gainDb)
+    }
+
+    fun toggleSharingPlayback() {
+        engine.toggleSharingPlayback()
+    }
+
+    fun requestModuleAudioProcessing(sampleRate: Int = 48000, channels: Int = 2) {
+        engine.requestAudioProcessing(sampleRate, channels)
+    }
+
+    fun stopModuleAudioProcessing() {
+        engine.stopAudioProcessing()
+    }
+
+    fun setSharingPlayheadMs(ms: Long) {
+        engine.setSharingPlayheadMs(ms)
+    }
+
+    fun toggleStemMute(channelId: String) {
+        engine.toggleStemMute(channelId)
+    }
+
+    fun toggleStemSolo(channelId: String) {
+        engine.toggleStemSolo(channelId)
+    }
+
+    fun playOnlyStem(channelId: String) {
+        engine.playOnlyStem(channelId)
+    }
+
+    fun playCombinationStems(channelIds: Set<String>) {
+        engine.playCombinationStems(channelIds)
+    }
+
+    fun clearStemSoloAndMute() {
+        engine.clearStemSoloAndMute()
+    }
+
+    // Universal Send To Routing State
+    private val _lastSendToEvent = MutableStateFlow<com.example.data.SendToTransferEvent?>(null)
+    val lastSendToEvent: StateFlow<com.example.data.SendToTransferEvent?> = _lastSendToEvent.asStateFlow()
+
+    fun sendAudioToDestination(sourceName: String, destinationId: String) {
+        val dest = com.example.data.UniversalSendToRegistry.findDestination(destinationId)
+        val event = com.example.data.SendToTransferEvent(
+            sourceName = sourceName,
+            destination = dest,
+            sharedMemoryPointer = engine.getDirectSharedMemoryPointer(),
+            duplicateFilesCreated = 0,
+            statusMessage = "Zero-Copy Audio Stream '$sourceName' routed to ${dest.name}"
+        )
+        _lastSendToEvent.value = event
+
+        // Automatically route to target section
+        setSection(dest.targetSection)
+
+        // Focus or trigger mode based on destination
+        when (dest.targetMode) {
+            "chords" -> engine.setDetectionMode("Combined Analysis")
+            "arpeggio" -> engine.setDetectionMode("Arpeggio Pattern Focus")
+            "phrase" -> engine.setDetectionMode("Phrase & Motif Recognition")
+            "practice" -> engine.setSpeedMultiplier(1.0f)
+            "solo_stem" -> {
+                val stemLower = sourceName.lowercase()
+                if (stemLower.contains("guitar")) engine.playOnlyStem("guitar")
+                else if (stemLower.contains("piano")) engine.playOnlyStem("piano")
+                else if (stemLower.contains("vocal")) engine.playOnlyStem("vocals")
+                else if (stemLower.contains("bass")) engine.playOnlyStem("bass")
+                else if (stemLower.contains("drum")) engine.playOnlyStem("drums")
+            }
+        }
+    }
+
+    fun clearLastSendToEvent() {
+        _lastSendToEvent.value = null
+    }
+
+    // Universal Audio Import State
+    private val _lastImportedAudioMetadata = MutableStateFlow<com.example.data.ImportedAudioMetadata?>(null)
+    val lastImportedAudioMetadata: StateFlow<com.example.data.ImportedAudioMetadata?> = _lastImportedAudioMetadata.asStateFlow()
+
+    fun importUniversalAudio(metadata: com.example.data.ImportedAudioMetadata) {
+        _lastImportedAudioMetadata.value = metadata
+        setUploadedFile(metadata.fileName, metadata.fileSize)
+        val titleClean = metadata.fileName.substringBeforeLast(".")
+        addSession(
+            title = "Project: $titleClean",
+            bpm = metadata.detectedBpm,
+            key = metadata.detectedKey,
+            notes = "Artist: ${metadata.artist} | Album: ${metadata.album} | Source: ${metadata.sourceType} | Format: ${metadata.formatExtension} (${metadata.bitrateKbps}, ${metadata.sampleRateHz}, ${metadata.channels})",
+            chords = "D#m, F#, B, C#",
+            tags = "Imported, ${metadata.formatExtension}, ${metadata.sourceType}"
+        )
+    }
+
     fun setUploadedFile(name: String?, size: String?) {
         engine.setUploadedFile(name, size)
         if (name != null) {
             runAutomatedTempoDetection(name)
             runAutomatedKeySignatureDetection(name)
+            generateTrackChordTimeline(name, null)
         } else {
             _isAnalyzingTempo.value = false
             _tempoDetectionProgress.value = 0f
@@ -103,6 +307,7 @@ class WorkstationViewModel(application: Application) : AndroidViewModel(applicat
             _isAnalyzingKey.value = false
             _keyAnalysisProgress.value = 0f
             _keyAnalysisLogs.value = emptyList()
+            _trackChordTimeline.value = emptyList()
         }
     }
 
@@ -205,6 +410,7 @@ class WorkstationViewModel(application: Application) : AndroidViewModel(applicat
             _keyAnalysisLogs.value = _keyAnalysisLogs.value + "Global Key signature correlation resolved: $estimatedKey"
             
             _globalKeySignature.value = estimatedKey
+            generateTrackChordTimeline(fileName, estimatedKey)
             delay(250)
             _isAnalyzingKey.value = false
         }
@@ -241,7 +447,111 @@ class WorkstationViewModel(application: Application) : AndroidViewModel(applicat
     private val _playbackPositionMs = MutableStateFlow(0L)
     val playbackPositionMs: StateFlow<Long> = _playbackPositionMs.asStateFlow()
 
+    // Synchronized Master Playback States
+    private val _pitchShiftSemitones = MutableStateFlow(0)
+    val pitchShiftSemitones: StateFlow<Int> = _pitchShiftSemitones.asStateFlow()
+
+    private val _isLearningSpeedMode = MutableStateFlow(false)
+    val isLearningSpeedMode: StateFlow<Boolean> = _isLearningSpeedMode.asStateFlow()
+
+    val transposedKeySignature: StateFlow<String> = combine(
+        _globalKeySignature,
+        _pitchShiftSemitones
+    ) { key, shift ->
+        com.example.data.MusicTheoryUtils.transposeKeySignature(key ?: "C Major", shift)
+    }.stateIn(
+        scope = viewModelScope,
+        started = SharingStarted.Eagerly,
+        initialValue = "C Major"
+    )
+
+    val transposedChordTimeline: StateFlow<List<TrackChordEntry>> = combine(
+        _trackChordTimeline,
+        _pitchShiftSemitones
+    ) { timeline, shift ->
+        if (shift == 0) {
+            timeline
+        } else {
+            timeline.map { entry ->
+                val transposedSym = com.example.data.MusicTheoryUtils.transposeChord(entry.chordSymbol, shift)
+                val info = engine.buildChordInfo(transposedSym)
+                entry.copy(
+                    chordSymbol = transposedSym,
+                    chordName = info.name,
+                    root = info.root,
+                    notes = info.notes
+                )
+            }
+        }
+    }.stateIn(
+        scope = viewModelScope,
+        started = SharingStarted.Eagerly,
+        initialValue = emptyList()
+    )
+
+    val transposedSyncedLyrics: StateFlow<List<SyncedLyricLine>> = combine(
+        _syncedLyrics,
+        _pitchShiftSemitones
+    ) { lyrics, shift ->
+        if (shift == 0) {
+            lyrics
+        } else {
+            lyrics.map { line ->
+                line.copy(chords = com.example.data.MusicTheoryUtils.transposeLyricChords(line.chords, shift))
+            }
+        }
+    }.stateIn(
+        scope = viewModelScope,
+        started = SharingStarted.Eagerly,
+        initialValue = emptyList()
+    )
+
+    private val _isLoopingEnabled = MutableStateFlow(true)
+    val isLoopingEnabled: StateFlow<Boolean> = _isLoopingEnabled.asStateFlow()
+
+    private val _loopStartMs = MutableStateFlow(0L)
+    val loopStartMs: StateFlow<Long> = _loopStartMs.asStateFlow()
+
+    private val _loopEndMs = MutableStateFlow(24000L)
+    val loopEndMs: StateFlow<Long> = _loopEndMs.asStateFlow()
+
+    private val _songSections = MutableStateFlow(
+        listOf(
+            SongSectionInfo("Intro", 0L, 3000L, 0xFF00E5FF),
+            SongSectionInfo("Verse 1", 3000L, 9000L, 0xFF3B82F6),
+            SongSectionInfo("Chorus", 9000L, 15000L, 0xFFD4AF37),
+            SongSectionInfo("Bridge", 15000L, 21000L, 0xFFA855F7),
+            SongSectionInfo("Outro", 21000L, 24000L, 0xFF10B981)
+        )
+    )
+    val songSections: StateFlow<List<SongSectionInfo>> = _songSections.asStateFlow()
+
+    private val _currentSongSection = MutableStateFlow<SongSectionInfo?>(_songSections.value.first())
+    val currentSongSection: StateFlow<SongSectionInfo?> = _currentSongSection.asStateFlow()
+
+    private val _syncedLyrics = MutableStateFlow(
+        listOf(
+            SyncedLyricLine(0L, 3000L, "♪ (Acoustic Guitar & Piano Intro) ♪", "C  -  G"),
+            SyncedLyricLine(3000L, 6000L, "Walking through the valley in the morning light", "Am  -  F"),
+            SyncedLyricLine(6000L, 9000L, "Searching for the harmony to make things right", "C  -  G7"),
+            SyncedLyricLine(9000L, 12000L, "Singing high above the hills, hear the rhythm call", "Cmaj7  -  Am7"),
+            SyncedLyricLine(12000L, 15000L, "Golden African grooves echo through the hall", "F  -  G13"),
+            SyncedLyricLine(15000L, 18000L, "Feel the bassline drop into the solo space", "Am7  -  Dm7"),
+            SyncedLyricLine(18000L, 21000L, "Every string resonating in its rightful place", "G13  -  Cmaj7"),
+            SyncedLyricLine(21000L, 24000L, "♪ Fade out with gentle chords into the night ♪", "Sungura A  -  C")
+        )
+    )
+    val syncedLyrics: StateFlow<List<SyncedLyricLine>> = _syncedLyrics.asStateFlow()
+
+    private val _activeLyricIndex = MutableStateFlow(0)
+    val activeLyricIndex: StateFlow<Int> = _activeLyricIndex.asStateFlow()
+
     fun getChordForPosition(posMs: Long): String {
+        val timeline = _trackChordTimeline.value
+        if (timeline.isNotEmpty()) {
+            val index = (posMs / 3000L).toInt().coerceIn(0, timeline.size - 1)
+            return timeline[index].chordSymbol
+        }
         val sec = posMs / 1000f
         return when {
             sec < 3.0f -> "C"
@@ -255,10 +565,171 @@ class WorkstationViewModel(application: Application) : AndroidViewModel(applicat
         }
     }
 
+    fun generateTrackChordTimeline(fileName: String, key: String?) {
+        val cleanKey = key ?: "C Major"
+        val chordSymbols = when {
+            fileName.lowercase().contains("demo_studio") || fileName.lowercase().contains("demo") -> {
+                listOf("C", "Am", "F", "G7", "Cmaj7", "Am7", "G13", "Sungura A")
+            }
+            cleanKey.contains("A Major") -> {
+                listOf("A", "F#m", "D", "E7", "Amaj7", "F#m7", "Bm7", "E9")
+            }
+            cleanKey.contains("G Major") -> {
+                listOf("G", "Em", "C", "D7", "Gmaj7", "Em7", "Cmaj7", "Am7")
+            }
+            cleanKey.contains("Bb Major") -> {
+                listOf("Bb", "Gm", "Eb", "F7", "Bbmaj7", "Gm7", "Cm7", "F9")
+            }
+            cleanKey.contains("F Major") -> {
+                listOf("F", "Dm", "Bb", "C7", "Fmaj7", "Dm7", "Gm7", "C9")
+            }
+            cleanKey.contains("D Minor") -> {
+                listOf("Dm", "Gm", "C", "F", "Bb", "Edim", "A7", "Dm")
+            }
+            cleanKey.contains("A Minor") -> {
+                listOf("Am", "Dm", "G", "C", "F", "Bdim", "E7", "Am")
+            }
+            else -> {
+                listOf("C", "Am", "F", "G7", "Cmaj7", "Am7", "G13", "C")
+            }
+        }
+
+        val timeline = chordSymbols.mapIndexed { index, symbol ->
+            val timeMs = index * 3000L
+            val sec = timeMs / 1000
+            val label = String.format("%02d:%02d", sec / 60, sec % 60)
+            val info = engine.buildChordInfo(symbol)
+            TrackChordEntry(
+                timeMs = timeMs,
+                timestampLabel = label,
+                chordSymbol = symbol,
+                chordName = info.name,
+                root = info.root,
+                type = info.type,
+                notes = info.notes,
+                confidence = info.confidence,
+                frequency = info.frequency,
+                formula = info.formula
+            )
+        }
+        _trackChordTimeline.value = timeline
+    }
+
+    fun toggleMasterPlayback() {
+        engine.toggleStemPlayback()
+    }
+
     fun setPlaybackPosition(ms: Long) {
-        _playbackPositionMs.value = ms.coerceIn(0L, 24000L)
-        val symbol = getChordForPosition(ms)
-        engine.selectChord(symbol)
+        val targetMs = ms.coerceIn(0L, 24000L)
+        _playbackPositionMs.value = targetMs
+        updateSynchronizedStateForPosition(targetMs)
+    }
+
+    fun setSpeedMultiplier(multiplier: Float) {
+        val clamped = multiplier.coerceIn(0.25f, 2.0f)
+        engine.setSpeedMultiplier(clamped)
+        viewModelScope.launch {
+            userPreferencesRepository.updatePlaybackSpeedMultiplier(clamped)
+        }
+    }
+
+    fun speedUp() {
+        val presets = listOf(0.25f, 0.50f, 0.75f, 1.00f, 1.25f, 1.50f, 2.00f)
+        val current = engine.tempoPreservedMultiplier.value
+        val next = presets.firstOrNull { it > current + 0.01f } ?: 2.00f
+        setSpeedMultiplier(next)
+    }
+
+    fun slowDown() {
+        val presets = listOf(0.25f, 0.50f, 0.75f, 1.00f, 1.25f, 1.50f, 2.00f)
+        val current = engine.tempoPreservedMultiplier.value
+        val prev = presets.lastOrNull { it < current - 0.01f } ?: 0.25f
+        setSpeedMultiplier(prev)
+    }
+
+    fun resetSpeed() {
+        setSpeedMultiplier(1.00f)
+    }
+
+    fun toggleLearningSpeedMode() {
+        val newMode = !_isLearningSpeedMode.value
+        _isLearningSpeedMode.value = newMode
+        if (newMode && engine.tempoPreservedMultiplier.value > 0.75f) {
+            setSpeedMultiplier(0.50f)
+        }
+    }
+
+    fun setPitchShift(semitones: Int) {
+        val clamped = semitones.coerceIn(-12, 12)
+        _pitchShiftSemitones.value = clamped
+        viewModelScope.launch {
+            userPreferencesRepository.updatePitchShiftSemitones(clamped)
+        }
+        updateSynchronizedStateForPosition(_playbackPositionMs.value)
+    }
+
+    fun transposeUp() {
+        setPitchShift(_pitchShiftSemitones.value + 1)
+    }
+
+    fun transposeDown() {
+        setPitchShift(_pitchShiftSemitones.value - 1)
+    }
+
+    fun resetTranspose() {
+        setPitchShift(0)
+    }
+
+    fun toggleLooping() {
+        _isLoopingEnabled.value = !_isLoopingEnabled.value
+    }
+
+    fun setLoopRange(startMs: Long, endMs: Long) {
+        val start = startMs.coerceIn(0L, 23000L)
+        val end = endMs.coerceIn(start + 1000L, 24000L)
+        _loopStartMs.value = start
+        _loopEndMs.value = end
+    }
+
+    fun stepPlaybackForward(deltaMs: Long = 1000L) {
+        setPlaybackPosition(_playbackPositionMs.value + deltaMs)
+    }
+
+    fun stepPlaybackBackward(deltaMs: Long = 1000L) {
+        setPlaybackPosition(_playbackPositionMs.value - deltaMs)
+    }
+
+    fun updateSynchronizedStateForPosition(posMs: Long) {
+        val rawChord = getChordForPosition(posMs)
+        val pitchShift = _pitchShiftSemitones.value
+        val currentSymbol = if (pitchShift != 0) {
+            com.example.data.MusicTheoryUtils.transposeChord(rawChord, pitchShift)
+        } else {
+            rawChord
+        }
+
+        val info = engine.buildChordInfo(currentSymbol)
+        engine.setCurrentChord(info)
+        
+        // Feed active notes to live notes buffer (drives Piano Keyboard & Guitar Fretboard)
+        val notesStr = info.notes.joinToString(" ")
+        engine.tapLiveMusicalNote(notesStr)
+
+        // Update active synced lyric index
+        val lyrics = _syncedLyrics.value
+        val lIdx = lyrics.indexOfFirst { line -> posMs >= line.startMs && posMs < line.endMs }
+        if (lIdx != -1) {
+            _activeLyricIndex.value = lIdx
+        }
+
+        // Update current song section
+        val sections = _songSections.value
+        val sec = sections.find { section -> posMs >= section.startMs && posMs < section.endMs }
+        if (sec != null) {
+            _currentSongSection.value = sec
+        }
+
+        engine.setSharingPlayheadMs(posMs)
     }
 
     init {
@@ -286,6 +757,9 @@ class WorkstationViewModel(application: Application) : AndroidViewModel(applicat
 
         val savedVocalEnhancement = sharedPrefs.getBoolean("vocal_enhancement", false)
         engine.setVocalEnhancementEnabled(savedVocalEnhancement)
+
+        val savedShowClassification = sharedPrefs.getBoolean("show_harmonic_classification", true)
+        _showHarmonicClassification.value = savedShowClassification
 
         // Load saved chord progression and current chord from local storage persistence
         val savedCurrentChordJson = sharedPrefs.getString("current_chord", null)
@@ -338,23 +812,47 @@ class WorkstationViewModel(application: Application) : AndroidViewModel(applicat
             val savedMelodyVol = sharedPrefs.getFloat("stem_melody_volume", 1.0f)
             val savedBassVol = sharedPrefs.getFloat("stem_bass_volume", 0.8f)
             val savedDrumsVol = sharedPrefs.getFloat("stem_drums_volume", 0.8f)
-            engine.setStemSeparationState(StemSeparationState.Success(savedVocalsVol, savedMelodyVol, savedBassVol, savedDrumsVol))
+            
+            val defaultMixer = com.example.data.StemMixerState()
+            val updatedChannels = defaultMixer.channels.map { ch ->
+                when (ch.id) {
+                    "vocals" -> ch.copy(volume = savedVocalsVol)
+                    "guitar" -> ch.copy(volume = savedMelodyVol)
+                    "bass" -> ch.copy(volume = savedBassVol)
+                    "drums" -> ch.copy(volume = savedDrumsVol)
+                    else -> ch
+                }
+            }
+            engine.setStemSeparationState(
+                StemSeparationState.Success(
+                    mixerState = defaultMixer.copy(channels = updatedChannels),
+                    vocalsVolume = savedVocalsVol,
+                    melodyVolume = savedMelodyVol,
+                    bassVolume = savedBassVol,
+                    drumsVolume = savedDrumsVol
+                )
+            )
+            generateTrackChordTimeline(savedFileName, savedGlobalKey)
         }
 
-        // Setup persistent listeners to save state dynamically on any changes
+        // Setup persistent listeners to save state dynamically on any changes in DataStore & SharedPrefs
         viewModelScope.launch {
             _currentSection.collect { section ->
                 sharedPrefs.edit().putString("current_section", section).apply()
+                userPreferencesRepository.updateSelectedNavigationTab(section)
+                userPreferencesRepository.updateActiveModuleId(section)
             }
         }
         viewModelScope.launch {
             engine.detectionMode.collect { mode ->
                 sharedPrefs.edit().putString("detection_mode", mode).apply()
+                userPreferencesRepository.updateDetectionMode(mode)
             }
         }
         viewModelScope.launch {
             engine.bpm.collect { bpmVal ->
                 sharedPrefs.edit().putInt("bpm", bpmVal).apply()
+                userPreferencesRepository.updateBpm(bpmVal)
             }
         }
         viewModelScope.launch {
@@ -396,6 +894,7 @@ class WorkstationViewModel(application: Application) : AndroidViewModel(applicat
                         .putString("uploaded_file_name", name)
                         .putString("uploaded_file_size", engine.uploadedFileSize.value)
                         .apply()
+                    userPreferencesRepository.updateLastActiveProjectTitle(name)
                 }
             }
         }
@@ -414,6 +913,7 @@ class WorkstationViewModel(application: Application) : AndroidViewModel(applicat
                     sharedPrefs.edit().remove("global_key_signature").apply()
                 } else {
                     sharedPrefs.edit().putString("global_key_signature", key).apply()
+                    userPreferencesRepository.updateGlobalKeySignature(key)
                 }
             }
         }
@@ -484,22 +984,50 @@ class WorkstationViewModel(application: Application) : AndroidViewModel(applicat
             }
         }
 
-        // Setup high-resolution playback simulation loop (100ms steps)
+        // Setup high-resolution master playback simulation loop (50ms steps = 20 FPS)
         viewModelScope.launch {
             while (true) {
-                delay(100L)
+                delay(50L)
                 if (isStemPlaybackActive.value) {
-                    var nextPos = _playbackPositionMs.value + 100L
-                    if (nextPos >= 24000L) {
-                        nextPos = 0L // loop seamlessly
+                    val speed = engine.tempoPreservedMultiplier.value
+                    val bpmFactor = engine.bpm.value / 120f
+                    val stepMs = (50L * speed * bpmFactor).toLong().coerceAtLeast(10L)
+
+                    var nextPos = _playbackPositionMs.value + stepMs
+                    val loopStart = _loopStartMs.value
+                    val loopEnd = _loopEndMs.value
+
+                    if (_isLoopingEnabled.value) {
+                        if (nextPos >= loopEnd) {
+                            nextPos = loopStart
+                        }
+                    } else {
+                        if (nextPos >= 24000L) {
+                            nextPos = 24000L
+                            engine.setStemPlayback(false)
+                        }
                     }
+
                     _playbackPositionMs.value = nextPos
-                    
-                    val expectedChord = getChordForPosition(nextPos)
-                    if (currentChord.value == null || currentChord.value?.name != buildChordInfoName(expectedChord)) {
-                        engine.selectChord(expectedChord)
-                    }
+                    updateSynchronizedStateForPosition(nextPos)
                 }
+            }
+        }
+
+        // Smart Module State Manager™ Periodic Background Auto-Save (Every 3 seconds)
+        viewModelScope.launch {
+            while (true) {
+                delay(3000L)
+                saveCurrentModuleStateImmediately()
+            }
+        }
+
+        // On app launch check for previously active session
+        viewModelScope.launch(Dispatchers.IO) {
+            val session = repository.getGlobalSession()
+            if (session != null && session.hasUnsavedSession) {
+                _resumeSessionInfo.value = session
+                _showResumeSessionPrompt.value = true
             }
         }
     }
@@ -520,12 +1048,158 @@ class WorkstationViewModel(application: Application) : AndroidViewModel(applicat
             "C/G" -> "C Major / G Bass"
             "G13" -> "G Dominant 13th"
             "Sungura A" -> "A Major (Sungura)"
+            "F#" -> "F# Major"
+            "B" -> "B Major"
+            "C#" -> "C# Major"
+            "D#m" -> "D# Minor"
+            "D#m7" -> "D# Minor 7th"
+            "F#add9" -> "F# Major add 9"
+            "Badd9" -> "B Major add 9"
+            "A#m" -> "A# Minor"
+            "G#m" -> "G# Minor"
             else -> "$symbol Major"
         }
     }
 
+    // Smart Module State Manager™ States
+    private val _showResumeSessionPrompt = MutableStateFlow(false)
+    val showResumeSessionPrompt: StateFlow<Boolean> = _showResumeSessionPrompt.asStateFlow()
+
+    private val _resumeSessionInfo = MutableStateFlow<AppGlobalSessionEntity?>(null)
+    val resumeSessionInfo: StateFlow<AppGlobalSessionEntity?> = _resumeSessionInfo.asStateFlow()
+
+    fun dismissResumePrompt() {
+        _showResumeSessionPrompt.value = false
+        viewModelScope.launch {
+            userPreferencesRepository.clearResumeDialogTrigger()
+        }
+    }
+
+    fun saveCurrentModuleStateImmediately() {
+        val activeModule = _currentSection.value
+        val title = uploadedFileName.value ?: "HZ CHORD AI Session"
+        val key = globalKeySignature.value ?: "C Major"
+        val bpmVal = engine.bpm.value
+        val recentChords = engine.chordTimeline.value.takeLast(4).joinToString(", ") { it.name }
+
+        viewModelScope.launch(Dispatchers.IO) {
+            val snapshot = SmartModuleStateEntity(
+                moduleId = activeModule,
+                projectTitle = title,
+                audioFilePath = uploadedFileName.value,
+                uploadedFileName = uploadedFileName.value,
+                playbackPositionMs = _playbackPositionMs.value,
+                playbackSpeed = engine.tempoPreservedMultiplier.value,
+                pitchShiftSemitones = _pitchShiftSemitones.value,
+                loopStartMs = _loopStartMs.value,
+                loopEndMs = _loopEndMs.value,
+                isLoopEnabled = _isLoopingEnabled.value,
+                currentChord = engine.currentChord.value?.name ?: "Cmaj7",
+                bpm = bpmVal,
+                detectedKey = key,
+                phraseDetectionResultsJson = engine.aiAnalysisResult.value ?: "",
+                lastActiveModuleId = activeModule,
+                lastUpdatedTimestamp = System.currentTimeMillis()
+            )
+            repository.saveModuleState(snapshot)
+
+            val globalSession = AppGlobalSessionEntity(
+                id = 1,
+                lastActiveModuleId = activeModule,
+                activeProjectTitle = title,
+                activeAudioFilePath = uploadedFileName.value,
+                uploadedFileName = uploadedFileName.value,
+                playbackPositionMs = _playbackPositionMs.value,
+                bpm = bpmVal,
+                keySignature = key,
+                hasUnsavedSession = true,
+                lastSavedTimestamp = System.currentTimeMillis()
+            )
+            repository.saveGlobalSession(globalSession)
+
+            // Persist session state flags & trigger into Jetpack DataStore
+            userPreferencesRepository.setUnsavedSessionData(
+                title = title,
+                bpm = bpmVal,
+                key = key,
+                chords = recentChords,
+                hasUnsaved = true,
+                showDialog = true
+            )
+            userPreferencesRepository.updateActiveModuleId(activeModule)
+            userPreferencesRepository.updateLastActiveProjectTitle(title)
+        }
+    }
+
+    fun restoreModuleState(moduleId: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val savedState = repository.getModuleState(moduleId)
+            if (savedState != null) {
+                _playbackPositionMs.value = savedState.playbackPositionMs
+                engine.setBpm(savedState.bpm)
+                _globalKeySignature.value = savedState.detectedKey
+                if (savedState.uploadedFileName != null) {
+                    engine.setUploadedFile(savedState.uploadedFileName, "7.8 MB")
+                }
+                if (savedState.phraseDetectionResultsJson.isNotEmpty()) {
+                    engine.setAiAnalysisResult(savedState.phraseDetectionResultsJson)
+                }
+            }
+        }
+    }
+
+    fun resumePreviousSession() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val session = repository.getGlobalSession()
+            if (session != null) {
+                _currentSection.value = session.lastActiveModuleId
+                _playbackPositionMs.value = session.playbackPositionMs
+                engine.setBpm(session.bpm)
+                _globalKeySignature.value = session.keySignature
+                if (session.uploadedFileName != null) {
+                    engine.setUploadedFile(session.uploadedFileName, "7.8 MB")
+                }
+                restoreModuleState(session.lastActiveModuleId)
+            }
+            _showResumeSessionPrompt.value = false
+            userPreferencesRepository.clearResumeDialogTrigger()
+        }
+    }
+
+    fun startNewProject() {
+        viewModelScope.launch(Dispatchers.IO) {
+            engine.setUploadedFile(null, null)
+            _playbackPositionMs.value = 0L
+            engine.setBpm(120)
+            _globalKeySignature.value = "C Major"
+            engine.clearTimeline()
+            _showResumeSessionPrompt.value = false
+            userPreferencesRepository.clearResumeDialogTrigger()
+            repository.saveGlobalSession(
+                AppGlobalSessionEntity(
+                    id = 1,
+                    lastActiveModuleId = "dashboard",
+                    activeProjectTitle = "New Project Session",
+                    hasUnsavedSession = false
+                )
+            )
+        }
+    }
+
+    fun openAnotherProject() {
+        _showResumeSessionPrompt.value = false
+        viewModelScope.launch {
+            userPreferencesRepository.clearResumeDialogTrigger()
+        }
+        setSection("library")
+    }
+
     fun setSection(section: String) {
-        _currentSection.value = section
+        if (_currentSection.value != section) {
+            saveCurrentModuleStateImmediately()
+            _currentSection.value = section
+            restoreModuleState(section)
+        }
     }
 
     private suspend fun seedInitialDatabase() {
@@ -723,28 +1397,153 @@ class WorkstationViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     // Export Center
-    fun triggerExport(format: String, session: ProjectSession?) {
+    // Export Center & Advanced Export System™
+    fun triggerAdvancedExport(format: com.example.util.AdvancedExportEngine.ExportFormat, session: ProjectSession?) {
+        val targetSession = session ?: ProjectSession(
+            title = uploadedFileName.value ?: "Live Workstation Session",
+            bpm = bpm.value,
+            keySignature = globalKeySignature.value ?: "C Major",
+            notes = "Live performance notes with 100% note preservation.",
+            detectedChords = chordTimeline.value.joinToString(", ") { it.name },
+            categoryTags = "Live, Transcription, Export"
+        )
+
         viewModelScope.launch {
-            _exportLog.value = "MAPPING WORKSTATION PROJECT DATA..."
-            delay(500)
-            _exportLog.value = "INJECTING BRANDING: 'Designed and Built by Joseph Hilary Zulukwa'..."
-            delay(400)
-            _exportLog.value = "BUILDING HARMONIC TRANSCRIPTIONS FOR: '${session?.title ?: "Active Live Analysis"}'..."
-            delay(400)
-            _exportLog.value = "GENERATING HZ CHORD AI EXPORT SHEET (.$format)..."
-            delay(600)
-            
+            _exportLog.value = "INITIALIZING ADVANCED EXPORT SYSTEM™ [${format.displayName}]..."
+            delay(300)
+            _exportLog.value = "INJECTING BRANDING: 'HZ CHORD AI • Designed and Built by Joseph Hilary Zulukwa'..."
+            delay(300)
+
             try {
-                if ((format.equals("midi", ignoreCase = true) || format.equals("mid", ignoreCase = true)) && session != null) {
-                    val file = com.example.audio.MidiExportEngine.exportSessionToMidi(getApplication(), session)
-                    _exportLog.value = "Export Success! MIDI File written to:\n${file.absolutePath}\n\n⚡ Tagline: 'Hear the Notes. Understand the Music. Powered by AI.'"
-                } else {
-                    _exportLog.value = "Export Success! File written to locally cached directory.\n⚡ Tagline: 'Hear the Notes. Understand the Music. Powered by AI.'"
+                val result = when (format) {
+                    com.example.util.AdvancedExportEngine.ExportFormat.PDF_REPORT -> {
+                        com.example.util.AdvancedExportEngine.generateFullPdfReport(
+                            context = getApplication(),
+                            session = targetSession,
+                            notes = _performanceNoteStream.value
+                        )
+                    }
+                    com.example.util.AdvancedExportEngine.ExportFormat.MIDI -> {
+                        com.example.util.AdvancedExportEngine.exportMidi(
+                            context = getApplication(),
+                            session = targetSession
+                        )
+                    }
+                    com.example.util.AdvancedExportEngine.ExportFormat.CSV,
+                    com.example.util.AdvancedExportEngine.ExportFormat.JSON,
+                    com.example.util.AdvancedExportEngine.ExportFormat.MUSIC_XML -> {
+                        if (_performanceNoteStream.value.isNotEmpty()) {
+                            com.example.util.AdvancedExportEngine.exportNoteTranscription(
+                                context = getApplication(),
+                                notes = _performanceNoteStream.value,
+                                format = format
+                            )
+                        } else {
+                            val dummyChords = chordTimeline.value.mapIndexed { idx, info ->
+                                com.example.data.DetectedChord(
+                                    timestampMs = idx * 1000L,
+                                    chordName = info.name,
+                                    rootNote = info.name.take(1),
+                                    chordType = "Major",
+                                    notes = info.notes.joinToString(",")
+                                )
+                            }
+                            com.example.util.AdvancedExportEngine.exportChordTranscription(
+                                context = getApplication(),
+                                chords = dummyChords,
+                                keySignature = targetSession.keySignature,
+                                format = format
+                            )
+                        }
+                    }
+                    com.example.util.AdvancedExportEngine.ExportFormat.CHORD_SHEET -> {
+                        val dummyChords = chordTimeline.value.mapIndexed { idx, info ->
+                            com.example.data.DetectedChord(
+                                timestampMs = idx * 1000L,
+                                chordName = info.name,
+                                rootNote = info.name.take(1),
+                                chordType = "Major",
+                                notes = info.notes.joinToString(",")
+                            )
+                        }
+                        com.example.util.AdvancedExportEngine.exportChordTranscription(
+                            context = getApplication(),
+                            chords = dummyChords,
+                            keySignature = targetSession.keySignature,
+                            format = format
+                        )
+                    }
+                    else -> {
+                        com.example.util.AdvancedExportEngine.exportNoteTranscription(
+                            context = getApplication(),
+                            notes = _performanceNoteStream.value,
+                            format = format
+                        )
+                    }
                 }
+
+                _exportLog.value = "Export Success! [${result.format.displayName}]\n" +
+                        "File Path: ${result.file.absolutePath}\n" +
+                        "Size: ${result.sizeBytes} bytes\n\n" +
+                        "⚡ HZ CHORD AI • 'Hear the Notes. Understand the Music. Powered by AI.'"
             } catch (e: Exception) {
-                _exportLog.value = "Export Failed: ${e.message}"
+                _exportLog.value = "Export Error: ${e.localizedMessage ?: "Unknown Error"}"
             }
         }
+    }
+
+    fun triggerStemExport(stemName: String, format: com.example.util.AdvancedExportEngine.ExportFormat) {
+        viewModelScope.launch {
+            _exportLog.value = "PREPARING STEM EXPORT FOR: '$stemName'..."
+            delay(300)
+            try {
+                val result = com.example.util.AdvancedExportEngine.exportIndividualStem(
+                    context = getApplication(),
+                    stemName = stemName,
+                    format = format
+                )
+                _exportLog.value = "Stem Export Success! [${result.title}]\nFile: ${result.file.absolutePath}"
+            } catch (e: Exception) {
+                _exportLog.value = "Stem Export Error: ${e.message}"
+            }
+        }
+    }
+
+    fun triggerStemPackageExport() {
+        val title = uploadedFileName.value ?: "Live Workstation Session"
+        val bpmVal = bpm.value
+        val key = globalKeySignature.value ?: "C Major"
+        val stemNames = listOf("Vocals", "Drums", "Bass", "Guitar", "Piano", "Strings", "Other")
+
+        viewModelScope.launch {
+            _exportLog.value = "BUNDLING ADVANCED STEM PACKAGE [7 SYNCHRONIZED TRACKS]..."
+            delay(400)
+            try {
+                val result = com.example.util.AdvancedExportEngine.exportStemPackage(
+                    context = getApplication(),
+                    projectTitle = title,
+                    bpm = bpmVal,
+                    key = key,
+                    stems = stemNames
+                )
+                _exportLog.value = "Stem Package Export Success!\nPackage Path: ${result.file.absolutePath}\n\nIncludes 7 synchronized stems, analysis metadata & project session."
+            } catch (e: Exception) {
+                _exportLog.value = "Package Export Failed: ${e.message}"
+            }
+        }
+    }
+
+    fun triggerExport(format: String, session: ProjectSession?) {
+        val expFormat = when (format.lowercase()) {
+            "pdf" -> com.example.util.AdvancedExportEngine.ExportFormat.PDF_REPORT
+            "midi", "mid" -> com.example.util.AdvancedExportEngine.ExportFormat.MIDI
+            "csv" -> com.example.util.AdvancedExportEngine.ExportFormat.CSV
+            "json" -> com.example.util.AdvancedExportEngine.ExportFormat.JSON
+            "musicxml", "xml" -> com.example.util.AdvancedExportEngine.ExportFormat.MUSIC_XML
+            "chord_sheet", "chords" -> com.example.util.AdvancedExportEngine.ExportFormat.CHORD_SHEET
+            else -> com.example.util.AdvancedExportEngine.ExportFormat.TXT
+        }
+        triggerAdvancedExport(expFormat, session)
     }
 
     fun dismissExportLog() {

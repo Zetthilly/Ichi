@@ -6,12 +6,22 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlin.math.sin
 import kotlin.random.Random
 import com.squareup.moshi.JsonClass
+import com.example.data.UniversalAudioSharingState
+import com.example.data.SharingModuleStage
+import com.example.data.StemMixerState
+import com.example.data.StemChannelData
 
 // Sealed state for AI Stem Separation
 sealed class StemSeparationState {
     object Idle : StemSeparationState()
     data class Processing(val progress: Float, val mode: String, val etaSeconds: Int) : StemSeparationState()
-    data class Success(val vocalsVolume: Float, val melodyVolume: Float, val bassVolume: Float, val drumsVolume: Float) : StemSeparationState()
+    data class Success(
+        val mixerState: StemMixerState = StemMixerState(),
+        val vocalsVolume: Float = 1.0f,
+        val melodyVolume: Float = 1.0f,
+        val bassVolume: Float = 1.0f,
+        val drumsVolume: Float = 1.0f
+    ) : StemSeparationState()
 }
 
 // Simulated tuner note info
@@ -120,12 +130,94 @@ class AudioWorkstationEngine {
     private val _vocalEnhancementEnabled = MutableStateFlow(false)
     val vocalEnhancementEnabled: StateFlow<Boolean> = _vocalEnhancementEnabled.asStateFlow()
 
+    // Universal Audio Sharing Engine™ State
+    private val _sharingState = MutableStateFlow(UniversalAudioSharingState())
+    val sharingState: StateFlow<UniversalAudioSharingState> = _sharingState.asStateFlow()
+
+    fun toggleSharingModuleBypass(moduleId: String) {
+        val current = _sharingState.value
+        val updatedChain = current.modulesChain.map { stage ->
+            if (stage.id == moduleId) {
+                stage.copy(
+                    isBypassed = !stage.isBypassed,
+                    statusMessage = if (!stage.isBypassed) "Bypassed (Zero-Latency Audio Pass-Through)" else "Direct Shared Stream Active"
+                )
+            } else stage
+        }
+        _sharingState.value = current.copy(modulesChain = updatedChain)
+    }
+
+    fun setSharingModuleGain(moduleId: String, gainDb: Float) {
+        val current = _sharingState.value
+        val updatedChain = current.modulesChain.map { stage ->
+            if (stage.id == moduleId) stage.copy(gainDb = gainDb) else stage
+        }
+        _sharingState.value = current.copy(modulesChain = updatedChain)
+    }
+
+    fun setSharingPlayheadMs(playheadMs: Long) {
+        val current = _sharingState.value
+        _sharingState.value = current.copy(currentPlayheadMs = playheadMs)
+    }
+
     // Real-time Waveform visualizer synthesizer seeds
     private var timeSeed = 0.0f
 
     init {
         // Set an initial active chord C Major
         selectChord("C")
+        // Zero audio processing on app startup until explicitly requested by a module
+        _sharingState.value = _sharingState.value.copy(
+            sharedBufferMemoryRef = "Standby (Zero Audio Processing Until Module Request)",
+            oboeBackendName = "Oboe AAudio (Idle)",
+            oboeLatencyMs = 0.0f,
+            oboeEngineRunning = false,
+            isPlaying = false
+        )
+    }
+
+    fun requestAudioProcessing(sampleRate: Int = 48000, channels: Int = 2) {
+        val current = _sharingState.value
+        if (!current.oboeEngineRunning) {
+            try {
+                OboeAudioService.instance.startNativeEngine(sampleRate, channels)
+                val memPtr = OboeAudioService.instance.getDirectSharedMemoryPointer()
+                _sharingState.value = current.copy(
+                    sharedBufferMemoryRef = "$memPtr (Zero-Copy Unified Direct Pointer)",
+                    oboeBackendName = OboeAudioService.instance.metrics.value.apiBackend,
+                    oboeLatencyMs = OboeAudioService.instance.metrics.value.latencyMs,
+                    oboeEngineRunning = true,
+                    isPlaying = true
+                )
+            } catch (e: Exception) {
+                // graceful fallback
+            }
+        }
+    }
+
+    fun stopAudioProcessing() {
+        val current = _sharingState.value
+        if (current.oboeEngineRunning) {
+            try {
+                OboeAudioService.instance.stopNativeEngine()
+            } catch (e: Exception) {
+                // graceful fallback
+            }
+            _sharingState.value = current.copy(
+                sharedBufferMemoryRef = "Standby (Zero Audio Processing)",
+                oboeEngineRunning = false,
+                isPlaying = false
+            )
+        }
+    }
+
+    fun toggleSharingPlayback() {
+        val current = _sharingState.value
+        if (current.isPlaying) {
+            stopAudioProcessing()
+        } else {
+            requestAudioProcessing(current.sampleRateHz, current.channels)
+        }
     }
 
     fun setDetectionMode(mode: String) {
@@ -176,8 +268,11 @@ class AudioWorkstationEngine {
 
     fun toggleRecording() {
         _isRecording.value = !_isRecording.value
-        if (!_isRecording.value) {
+        if (_isRecording.value) {
+            requestAudioProcessing()
+        } else {
             _recordingTimerSeconds.value = 0
+            stopAudioProcessing()
         }
     }
 
@@ -204,6 +299,18 @@ class AudioWorkstationEngine {
 
     fun adjustSpeedMultiplier(multiplier: Float) {
         _tempoPreservedMultiplier.value = multiplier.coerceIn(0.5f, 2.0f)
+    }
+
+    fun setSpeedMultiplier(multiplier: Float) {
+        adjustSpeedMultiplier(multiplier)
+    }
+
+    fun getDirectSharedMemoryPointer(): String {
+        return try {
+            OboeAudioService.instance.getDirectSharedMemoryPointer()
+        } catch (e: Exception) {
+            "0x7F80000000 (Oboe Zero-Copy Direct Memory Address)"
+        }
     }
 
     fun toggleNoiseReduction() { _noiseReductionEnabled.value = !_noiseReductionEnabled.value }
@@ -328,7 +435,13 @@ class AudioWorkstationEngine {
         val currentState = _stemSeparation.value
         if (currentState is StemSeparationState.Processing) {
             if (progress >= 1.0f) {
-                _stemSeparation.value = StemSeparationState.Success(1.0f, 1.0f, 0.8f, 0.8f)
+                _stemSeparation.value = StemSeparationState.Success(
+                    mixerState = StemMixerState(),
+                    vocalsVolume = 1.0f,
+                    melodyVolume = 1.0f,
+                    bassVolume = 0.8f,
+                    drumsVolume = 0.8f
+                )
             } else {
                 val eta = ((1.0f - progress) * 8).toInt()
                 _stemSeparation.value = StemSeparationState.Processing(progress, currentState.mode, eta)
@@ -339,13 +452,89 @@ class AudioWorkstationEngine {
     fun adjustStemVolume(stem: String, volume: Float) {
         val currentState = _stemSeparation.value
         if (currentState is StemSeparationState.Success) {
-            _stemSeparation.value = when(stem) {
-                "vocals" -> currentState.copy(vocalsVolume = volume)
-                "melody" -> currentState.copy(melodyVolume = volume)
-                "bass" -> currentState.copy(bassVolume = volume)
-                "drums" -> currentState.copy(drumsVolume = volume)
-                else -> currentState
+            val currentMixer = currentState.mixerState
+            val updatedChannels = currentMixer.channels.map { ch ->
+                if (ch.id == stem || (stem == "melody" && ch.id == "guitar")) {
+                    ch.copy(volume = volume)
+                } else ch
             }
+            val voc = updatedChannels.find { it.id == "vocals" }?.volume ?: currentState.vocalsVolume
+            val mel = updatedChannels.find { it.id == "guitar" }?.volume ?: currentState.melodyVolume
+            val bas = updatedChannels.find { it.id == "bass" }?.volume ?: currentState.bassVolume
+            val drm = updatedChannels.find { it.id == "drums" }?.volume ?: currentState.drumsVolume
+
+            _stemSeparation.value = currentState.copy(
+                mixerState = currentMixer.copy(channels = updatedChannels),
+                vocalsVolume = voc,
+                melodyVolume = mel,
+                bassVolume = bas,
+                drumsVolume = drm
+            )
+        }
+    }
+
+    fun toggleStemMute(channelId: String) {
+        val currentState = _stemSeparation.value
+        if (currentState is StemSeparationState.Success) {
+            val currentMixer = currentState.mixerState
+            val updatedChannels = currentMixer.channels.map { ch ->
+                if (ch.id == channelId) ch.copy(isMuted = !ch.isMuted) else ch
+            }
+            _stemSeparation.value = currentState.copy(mixerState = currentMixer.copy(channels = updatedChannels))
+        }
+    }
+
+    fun toggleStemSolo(channelId: String) {
+        val currentState = _stemSeparation.value
+        if (currentState is StemSeparationState.Success) {
+            val currentMixer = currentState.mixerState
+            val updatedChannels = currentMixer.channels.map { ch ->
+                if (ch.id == channelId) ch.copy(isSoloed = !ch.isSoloed) else ch
+            }
+            _stemSeparation.value = currentState.copy(mixerState = currentMixer.copy(channels = updatedChannels))
+        }
+    }
+
+    fun playOnlyStem(channelId: String) {
+        val currentState = _stemSeparation.value
+        if (currentState is StemSeparationState.Success) {
+            val currentMixer = currentState.mixerState
+            val updatedChannels = currentMixer.channels.map { ch ->
+                ch.copy(
+                    isSoloed = (ch.id == channelId),
+                    isMuted = false
+                )
+            }
+            _stemSeparation.value = currentState.copy(mixerState = currentMixer.copy(channels = updatedChannels))
+            _isStemPlaybackActive.value = true
+            requestAudioProcessing()
+        }
+    }
+
+    fun playCombinationStems(activeChannelIds: Set<String>) {
+        val currentState = _stemSeparation.value
+        if (currentState is StemSeparationState.Success) {
+            val currentMixer = currentState.mixerState
+            val updatedChannels = currentMixer.channels.map { ch ->
+                ch.copy(
+                    isSoloed = activeChannelIds.contains(ch.id),
+                    isMuted = false
+                )
+            }
+            _stemSeparation.value = currentState.copy(mixerState = currentMixer.copy(channels = updatedChannels))
+            _isStemPlaybackActive.value = true
+            requestAudioProcessing()
+        }
+    }
+
+    fun clearStemSoloAndMute() {
+        val currentState = _stemSeparation.value
+        if (currentState is StemSeparationState.Success) {
+            val currentMixer = currentState.mixerState
+            val updatedChannels = currentMixer.channels.map { ch ->
+                ch.copy(isSoloed = false, isMuted = false, volume = 1.0f)
+            }
+            _stemSeparation.value = currentState.copy(mixerState = currentMixer.copy(channels = updatedChannels))
         }
     }
 
@@ -361,15 +550,34 @@ class AudioWorkstationEngine {
         if (name == null) {
             _aiAnalysisResult.value = null
             _stemSeparation.value = StemSeparationState.Idle
+        } else {
+            val currentSharing = _sharingState.value
+            _sharingState.value = currentSharing.copy(
+                audioSourceFileName = name,
+                activeProjectTitle = "Project: ${name.substringBeforeLast(".")}",
+                sharedBufferMemoryRef = "0x" + Integer.toHexString(name.hashCode()).uppercase() + " (Zero-Copy Unified Pointer)",
+                duplicateFilesCreated = 0
+            )
         }
     }
 
     fun toggleStemPlayback() {
-        _isStemPlaybackActive.value = !_isStemPlaybackActive.value
+        val nextState = !_isStemPlaybackActive.value
+        _isStemPlaybackActive.value = nextState
+        if (nextState) {
+            requestAudioProcessing()
+        } else {
+            stopAudioProcessing()
+        }
     }
 
     fun setStemPlayback(active: Boolean) {
         _isStemPlaybackActive.value = active
+        if (active) {
+            requestAudioProcessing()
+        } else {
+            stopAudioProcessing()
+        }
     }
 
     fun setAiAnalysisResult(result: String?) {
@@ -418,7 +626,7 @@ class AudioWorkstationEngine {
     }
 
     // Static Dictionary Builder for Extended/Slash/Hybrid chord details
-    private fun buildChordInfo(symbol: String): DetectedChordInfo {
+    fun buildChordInfo(symbol: String): DetectedChordInfo {
         return when (symbol) {
             "C" -> DetectedChordInfo(
                 "C Major", "C", "1 - 3 - 5", listOf("C", "E", "G"),
@@ -489,6 +697,51 @@ class AudioWorkstationEngine {
                 "A Major (Sungura)", "A", "Fast Triplet Voicing", listOf("A", "C#", "E"),
                 0.96f, 440.00f, "African Guitar Style", "characteristic bright Sungura backing chord.",
                 listOf("D", "E7", "F#m")
+            )
+            "F#" -> DetectedChordInfo(
+                "F# Major", "F#", "1 - 3 - 5", listOf("F#", "A#", "C#"),
+                0.98f, 369.99f, "Major Triad", "Bright resonant F# Major chord, central to the progression.",
+                listOf("D#m", "B", "C#")
+            )
+            "B" -> DetectedChordInfo(
+                "B Major", "B", "1 - 3 - 5", listOf("B", "D#", "F#"),
+                0.97f, 246.94f, "Major Triad", "Luminous B Major harmony, acts as the subdominant balance.",
+                listOf("G#m", "D#m", "F#")
+            )
+            "C#" -> DetectedChordInfo(
+                "C# Major", "C#", "1 - 3 - 5", listOf("C#", "F", "G#"),
+                0.96f, 277.18f, "Major Triad", "Powerful C# Major chord, providing the dominant lift.",
+                listOf("A#m", "F#", "D#m")
+            )
+            "D#m" -> DetectedChordInfo(
+                "D# Minor", "D#", "1 - b3 - 5", listOf("D#", "F#", "A#"),
+                0.99f, 311.13f, "Minor Triad", "Solemn and deep D# Minor chord, the root key of the song.",
+                listOf("B", "F#", "C#")
+            )
+            "D#m7" -> DetectedChordInfo(
+                "D# Minor 7th", "D#", "1 - b3 - 5 - b7", listOf("D#", "F#", "A#", "C#"),
+                0.95f, 311.13f, "Minor Seventh", "Rich jazz-tinged minor seventh voicing for depth.",
+                listOf("Badd9", "F#add9", "C#")
+            )
+            "F#add9" -> DetectedChordInfo(
+                "F# Major add 9", "F#", "1 - 3 - 5 - 9", listOf("F#", "A#", "C#", "G#"),
+                0.94f, 369.99f, "Added Ninth", "Sleek and airy F# Major add 9 voicing.",
+                listOf("Badd9", "D#m7", "C#")
+            )
+            "Badd9" -> DetectedChordInfo(
+                "B Major add 9", "B", "1 - 3 - 5 - 9", listOf("B", "D#", "F#", "C#"),
+                0.94f, 246.94f, "Added Ninth", "Lush and wide open B Major add 9 voicing.",
+                listOf("F#add9", "D#m7", "C#")
+            )
+            "A#m" -> DetectedChordInfo(
+                "A# Minor", "A#", "1 - b3 - 5", listOf("A#", "C#", "F"),
+                0.93f, 233.08f, "Minor Triad", "Soft minor triad built on A#.",
+                listOf("F#", "D#m", "C#")
+            )
+            "G#m" -> DetectedChordInfo(
+                "G# Minor", "G#", "1 - b3 - 5", listOf("G#", "B", "D#"),
+                0.92f, 207.65f, "Minor Triad", "Mellow subdominant minor chord.",
+                listOf("B", "D#m", "F#")
             )
             else -> DetectedChordInfo(
                 "$symbol Major", symbol, "1 - 3 - 5", listOf(symbol, "unknown", "unknown"),

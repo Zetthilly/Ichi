@@ -36,4 +36,27 @@ interface WorkstationDao {
 
     @Query("DELETE FROM guitar_licks WHERE id = :id")
     suspend fun deleteLickById(id: Int)
+
+    // Smart Module State queries
+    @Query("SELECT * FROM smart_module_states WHERE moduleId = :moduleId LIMIT 1")
+    suspend fun getModuleState(moduleId: String): SmartModuleStateEntity?
+
+    @Query("SELECT * FROM smart_module_states")
+    fun getAllModuleStatesFlow(): Flow<List<SmartModuleStateEntity>>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun saveModuleState(state: SmartModuleStateEntity)
+
+    @Query("DELETE FROM smart_module_states WHERE moduleId = :moduleId")
+    suspend fun deleteModuleState(moduleId: String)
+
+    @Query("DELETE FROM smart_module_states")
+    suspend fun clearAllModuleStates()
+
+    // Global App Session
+    @Query("SELECT * FROM app_global_session WHERE id = 1 LIMIT 1")
+    suspend fun getGlobalSession(): AppGlobalSessionEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun saveGlobalSession(session: AppGlobalSessionEntity)
 }

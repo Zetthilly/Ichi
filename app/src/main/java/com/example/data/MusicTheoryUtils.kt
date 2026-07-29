@@ -141,4 +141,67 @@ object MusicTheoryUtils {
         
         return baseNumeral + extensionLabel
     }
+
+    /**
+     * Transposes a key signature string (e.g. "F# Major" -> "E Major" if semitones = -2).
+     */
+    fun transposeKeySignature(keySignature: String, semitones: Int): String {
+        if (semitones == 0 || keySignature.isBlank()) return keySignature
+        val clean = keySignature.replace("Key of", "").trim()
+        val parts = clean.split(" ")
+        val root = parts.firstOrNull() ?: return keySignature
+        val scaleType = if (parts.size > 1) parts.subList(1, parts.size).joinToString(" ") else ""
+        val transposedRoot = transposeNote(root, semitones)
+        return if (scaleType.isNotEmpty()) "$transposedRoot $scaleType" else transposedRoot
+    }
+
+    /**
+     * Transposes a space or dash-separated lyric chords string (e.g. "C - G" -> "D - A" if semitones = +2).
+     */
+    fun transposeLyricChords(chordsStr: String, semitones: Int): String {
+        if (semitones == 0 || chordsStr.isBlank()) return chordsStr
+        val tokens = chordsStr.split(" ")
+        return tokens.joinToString(" ") { token ->
+            val cleaned = token.trim()
+            if (cleaned == "-" || cleaned == "♪" || cleaned.isEmpty()) {
+                cleaned
+            } else {
+                transposeChord(cleaned, semitones)
+            }
+        }
+    }
+
+    /**
+     * Returns human readable interval description for semitone shift amount.
+     */
+    fun getIntervalName(semitones: Int): String {
+        return when (semitones) {
+            -12 -> "Octave Down (-12 ST)"
+            -11 -> "Major 7th Down (-11 ST)"
+            -10 -> "Minor 7th Down (-10 ST)"
+            -9 -> "Major 6th Down (-9 ST)"
+            -8 -> "Minor 6th Down (-8 ST)"
+            -7 -> "Perfect 5th Down (-7 ST)"
+            -6 -> "Tritone Down (-6 ST)"
+            -5 -> "Perfect 4th Down (-5 ST)"
+            -4 -> "Major 3rd Down (-4 ST)"
+            -3 -> "Minor 3rd Down (-3 ST)"
+            -2 -> "Whole Step Down (-2 ST)"
+            -1 -> "Half Step Down (-1 ST)"
+            0 -> "Original Pitch (0 ST)"
+            1 -> "Half Step Up (+1 ST)"
+            2 -> "Whole Step Up (+2 ST)"
+            3 -> "Minor 3rd Up (+3 ST)"
+            4 -> "Major 3rd Up (+4 ST)"
+            5 -> "Perfect 4th Up (+5 ST)"
+            6 -> "Tritone Up (+6 ST)"
+            7 -> "Perfect 5th Up (+7 ST)"
+            8 -> "Minor 6th Up (+8 ST)"
+            9 -> "Major 6th Up (+9 ST)"
+            10 -> "Minor 7th Up (+10 ST)"
+            11 -> "Major 7th Up (+11 ST)"
+            12 -> "Octave Up (+12 ST)"
+            else -> if (semitones > 0) "+$semitones Semitones" else "$semitones Semitones"
+        }
+    }
 }

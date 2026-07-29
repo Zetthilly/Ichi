@@ -33,12 +33,14 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -47,11 +49,20 @@ import android.net.Uri
 import android.app.Activity
 import com.example.util.AudioPermissionHelper
 import com.example.util.AudioPermissionRationaleDialog
+import com.example.util.UniversalAudioMetadataExtractor
+import com.example.data.ImportedAudioMetadata
+import com.example.data.UniversalAudioSharingState
+import com.example.data.SharingModuleStage
 import com.example.audio.DetectedChordInfo
 import com.example.audio.StemSeparationState
+import com.example.data.StemMixerState
+import com.example.data.StemChannelData
 import com.example.data.ProjectSession
 import com.example.data.GuitarLick
 import com.example.viewmodel.WorkstationViewModel
+import com.example.ui.navigation.*
+import com.example.ui.modules.*
+import com.example.viewmodel.modules.*
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import com.example.ui.theme.MyApplicationTheme
@@ -647,6 +658,20 @@ fun TopBarNotificationsDialog(
 @Composable
 fun WorkstationMainLayout(viewModel: WorkstationViewModel, modifier: Modifier = Modifier) {
     val currentSection by viewModel.currentSection.collectAsStateWithLifecycle()
+    val lastSendToEvent by viewModel.lastSendToEvent.collectAsStateWithLifecycle()
+    val showResumeSessionPrompt by viewModel.showResumeSessionPrompt.collectAsStateWithLifecycle()
+
+    val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
+    val coroutineScope = rememberCoroutineScope()
+
+    // Dedicated Module ViewModels initialized sharing the single WorkstationViewModel
+    val launcherViewModel = remember(viewModel) { ModuleLauncherViewModel(viewModel) }
+    val analyzerViewModel = remember(viewModel) { RealtimeAnalyzerViewModel(viewModel) }
+    val voicingsViewModel = remember(viewModel) { InstrumentVoicingsViewModel(viewModel) }
+    val stemViewModel = remember(viewModel) { StemSeparatorViewModel(viewModel) }
+    val dspViewModel = remember(viewModel) { StudioDspViewModel(viewModel) }
+    val sharingViewModel = remember(viewModel) { UniversalSharingViewModel(viewModel) }
+    val earTrainingViewModel = remember(viewModel) { EarTrainingViewModel(viewModel) }
 
     // Modals trigger states
     var showRecorderModal by remember { mutableStateOf(false) }
@@ -655,145 +680,621 @@ fun WorkstationMainLayout(viewModel: WorkstationViewModel, modifier: Modifier = 
     var showSearchDialog by remember { mutableStateOf(false) }
     var showNotificationsDialog by remember { mutableStateOf(false) }
     var isFabExpanded by remember { mutableStateOf(false) }
+    var activeSendToSourceName by remember { mutableStateOf<String?>(null) }
 
-    Scaffold(
-        modifier = modifier.fillMaxSize(),
-        topBar = {
-            WorkstationMainTopAppBar(
+    ModalNavigationDrawer(
+        drawerState = drawerState,
+        drawerContent = {
+            CyberAppDrawerSheet(
+                activeRoute = currentSection,
                 viewModel = viewModel,
-                onSearchClick = { showSearchDialog = true },
-                onNotificationsClick = { showNotificationsDialog = true },
-                onSettingsClick = { viewModel.setSection("Settings") }
+                onNavigate = { route -> viewModel.setSection(route) },
+                onCloseDrawer = { coroutineScope.launch { drawerState.close() } }
             )
-        },
-        bottomBar = {
-            WorkstationBottomNavigation(
-                activeSection = currentSection,
-                onSectionClick = { viewModel.setSection(it) }
-            )
-        },
-        floatingActionButton = {
-            Column(
-                horizontalAlignment = Alignment.End,
-                verticalArrangement = Arrangement.spacedBy(10.dp),
-                modifier = Modifier.padding(bottom = 16.dp, end = 8.dp)
-            ) {
-                // Expanded Sub-actions
-                AnimatedVisibility(
-                    visible = isFabExpanded,
-                    enter = fadeIn() + slideInVertically(initialOffsetY = { it / 2 }),
-                    exit = fadeOut() + slideOutVertically(targetOffsetY = { it / 2 })
+        }
+    ) {
+        Scaffold(
+            modifier = modifier.fillMaxSize(),
+            bottomBar = {
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    MasterSynchronizedPlaybackBar(
+                        viewModel = viewModel,
+                        onOpenSendToDialog = { activeSendToSourceName = it }
+                    )
+                }
+            },
+            floatingActionButton = {
+                Column(
+                    horizontalAlignment = Alignment.End,
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                    modifier = Modifier.padding(bottom = 16.dp, end = 8.dp)
                 ) {
-                    Column(
-                        horizontalAlignment = Alignment.End,
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
-                        modifier = Modifier.padding(bottom = 4.dp)
+                    // Expanded Sub-actions
+                    AnimatedVisibility(
+                        visible = isFabExpanded,
+                        enter = fadeIn() + slideInVertically(initialOffsetY = { it / 2 }),
+                        exit = fadeOut() + slideOutVertically(targetOffsetY = { it / 2 })
                     ) {
-                        // Action 1: Quick Record
-                        ExtendedFloatingActionButton(
-                            onClick = {
-                                isFabExpanded = false
-                                showRecorderModal = true
-                            },
-                            containerColor = Color(0xFF260D0D),
-                            contentColor = Color(0xFFEF5350),
-                            icon = { Icon(Icons.Default.Mic, contentDescription = "Quick Record", modifier = Modifier.size(16.dp)) },
-                            text = { Text("Quick Record", fontSize = 11.sp, fontWeight = FontWeight.Bold) },
-                            modifier = Modifier.height(38.dp)
-                        )
+                        Column(
+                            horizontalAlignment = Alignment.End,
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.padding(bottom = 4.dp)
+                        ) {
+                            // Action 1: Quick Record
+                            ExtendedFloatingActionButton(
+                                onClick = {
+                                    isFabExpanded = false
+                                    showRecorderModal = true
+                                },
+                                containerColor = Color(0xFF260D0D),
+                                contentColor = Color(0xFFEF5350),
+                                icon = { Icon(Icons.Default.Mic, contentDescription = "Quick Record", modifier = Modifier.size(16.dp)) },
+                                text = { Text("Quick Record", fontSize = 11.sp, fontWeight = FontWeight.Bold) },
+                                modifier = Modifier.height(38.dp)
+                            )
 
-                        // Action 2: Quick Analyze
-                        ExtendedFloatingActionButton(
-                            onClick = {
-                                isFabExpanded = false
-                                viewModel.setSection("Analyzer")
-                            },
-                            containerColor = Color(0xFF241C04),
-                            contentColor = Color(0xFFD4AF37),
-                            icon = { Icon(Icons.Default.InterpreterMode, contentDescription = "Quick Analyze", modifier = Modifier.size(16.dp)) },
-                            text = { Text("Quick Analyze", fontSize = 11.sp, fontWeight = FontWeight.Bold) },
-                            modifier = Modifier.height(38.dp)
-                        )
+                            // Action 2: Quick Analyze
+                            ExtendedFloatingActionButton(
+                                onClick = {
+                                    isFabExpanded = false
+                                    viewModel.setSection("analyzer")
+                                },
+                                containerColor = Color(0xFF241C04),
+                                contentColor = Color(0xFFD4AF37),
+                                icon = { Icon(Icons.Default.InterpreterMode, contentDescription = "Quick Analyze", modifier = Modifier.size(16.dp)) },
+                                text = { Text("Quick Analyze", fontSize = 11.sp, fontWeight = FontWeight.Bold) },
+                                modifier = Modifier.height(38.dp)
+                            )
 
-                        // Action 3: Quick Import Audio
-                        ExtendedFloatingActionButton(
-                            onClick = {
-                                isFabExpanded = false
-                                showImportModal = true
-                            },
-                            containerColor = Color(0xFF04202B),
-                            contentColor = Color(0xFF00E5FF),
-                            icon = { Icon(Icons.Default.FileOpen, contentDescription = "Quick Import Audio", modifier = Modifier.size(16.dp)) },
-                            text = { Text("Import Audio", fontSize = 11.sp, fontWeight = FontWeight.Bold) },
-                            modifier = Modifier.height(38.dp)
+                            // Action 3: Quick Import Audio
+                            ExtendedFloatingActionButton(
+                                onClick = {
+                                    isFabExpanded = false
+                                    showImportModal = true
+                                },
+                                containerColor = Color(0xFF04202B),
+                                contentColor = Color(0xFF00E5FF),
+                                icon = { Icon(Icons.Default.FileOpen, contentDescription = "Quick Import Audio", modifier = Modifier.size(16.dp)) },
+                                text = { Text("Import Audio", fontSize = 11.sp, fontWeight = FontWeight.Bold) },
+                                modifier = Modifier.height(38.dp)
+                            )
+                        }
+                    }
+
+                    // Main Trigger FAB
+                    ExtendedFloatingActionButton(
+                        onClick = { isFabExpanded = !isFabExpanded },
+                        containerColor = MaterialTheme.colorScheme.secondary,
+                        contentColor = MaterialTheme.colorScheme.onSecondary,
+                        elevation = FloatingActionButtonDefaults.elevation(defaultElevation = 8.dp),
+                        icon = { Icon(if (isFabExpanded) Icons.Default.Close else Icons.Default.Add, "Action button") },
+                        text = { Text(if (isFabExpanded) "Cancel" else "Quick Actions", fontWeight = FontWeight.Bold, letterSpacing = 0.5.sp) },
+                        modifier = Modifier.testTag("quick_action_fab")
+                    )
+                }
+            }
+        ) { innerPadding ->
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(innerPadding)
+            ) {
+                // Section Switcher - Full-Screen Workspace Modules
+                when (currentSection) {
+                    "launcher" -> ModuleLauncherScreen(
+                        launcherViewModel = launcherViewModel,
+                        sharedViewModel = viewModel,
+                        onOpenDrawer = { coroutineScope.launch { drawerState.open() } },
+                        onOpenSendToDialog = { activeSendToSourceName = it }
+                    )
+                    "analyzer", "Analyzer" -> RealtimeAnalyzerModuleScreen(
+                        analyzerViewModel = analyzerViewModel,
+                        sharedViewModel = viewModel,
+                        onOpenDrawer = { coroutineScope.launch { drawerState.open() } },
+                        onOpenSendToDialog = { activeSendToSourceName = it }
+                    )
+                    "voicings" -> InstrumentVoicingsModuleScreen(
+                        voicingsViewModel = voicingsViewModel,
+                        sharedViewModel = viewModel,
+                        onOpenDrawer = { coroutineScope.launch { drawerState.open() } },
+                        onOpenSendToDialog = { activeSendToSourceName = it }
+                    )
+                    "stems", "Studio" -> StemSeparatorModuleScreen(
+                        stemViewModel = stemViewModel,
+                        sharedViewModel = viewModel,
+                        onOpenDrawer = { coroutineScope.launch { drawerState.open() } },
+                        onOpenSendToDialog = { activeSendToSourceName = it }
+                    )
+                    "dsp" -> StudioDspModuleScreen(
+                        dspViewModel = dspViewModel,
+                        sharedViewModel = viewModel,
+                        onOpenDrawer = { coroutineScope.launch { drawerState.open() } },
+                        onOpenSendToDialog = { activeSendToSourceName = it }
+                    )
+                    "sharing" -> UniversalSharingModuleScreen(
+                        sharingViewModel = sharingViewModel,
+                        sharedViewModel = viewModel,
+                        onOpenDrawer = { coroutineScope.launch { drawerState.open() } },
+                        onOpenSendToDialog = { activeSendToSourceName = it }
+                    )
+                    "quiz" -> EarTrainingModuleScreen(
+                        earTrainingViewModel = earTrainingViewModel,
+                        sharedViewModel = viewModel,
+                        onOpenDrawer = { coroutineScope.launch { drawerState.open() } },
+                        onOpenSendToDialog = { activeSendToSourceName = it }
+                    )
+                    "library", "Sessions" -> ProjectLibraryModuleScreen(
+                        sharedViewModel = viewModel,
+                        onOpenDrawer = { coroutineScope.launch { drawerState.open() } },
+                        onOpenSendToDialog = { activeSendToSourceName = it }
+                    )
+                    "settings", "Settings" -> SettingsModuleScreen(
+                        sharedViewModel = viewModel,
+                        onOpenDrawer = { coroutineScope.launch { drawerState.open() } },
+                        onOpenSendToDialog = { activeSendToSourceName = it }
+                    )
+                    else -> DedicatedModuleWorkspace(
+                        moduleId = currentSection,
+                        viewModel = viewModel,
+                        onOpenDrawer = { coroutineScope.launch { drawerState.open() } },
+                        onOpenSendToDialog = { activeSendToSourceName = it }
+                    )
+                }
+
+                // MODALS / DIALOGS
+                if (showRecorderModal) {
+                    AudioRecorderDialog(
+                        viewModel = viewModel,
+                        onDismiss = { showRecorderModal = false }
+                    )
+                }
+
+                if (showAddSessionModal) {
+                    AddSessionDialog(
+                        viewModel = viewModel,
+                        onDismiss = { showAddSessionModal = false }
+                    )
+                }
+
+                if (showImportModal) {
+                    ImportAudioDialog(
+                        viewModel = viewModel,
+                        onDismiss = { showImportModal = false }
+                    )
+                }
+
+                if (showSearchDialog) {
+                    TopBarSearchDialog(
+                        viewModel = viewModel,
+                        onDismiss = { showSearchDialog = false }
+                    )
+                }
+
+                if (showNotificationsDialog) {
+                    TopBarNotificationsDialog(
+                        onDismiss = { showNotificationsDialog = false }
+                    )
+                }
+
+                if (showResumeSessionPrompt) {
+                    ResumeSessionDialog(
+                        viewModel = viewModel,
+                        onDismiss = { viewModel.dismissResumePrompt() }
+                    )
+                }
+
+                if (showResumeSessionPrompt) {
+                    ResumeSessionDialog(
+                        viewModel = viewModel,
+                        onDismiss = { viewModel.dismissResumePrompt() }
+                    )
+                }
+
+                // Universal Send To Modal Dialog
+                activeSendToSourceName?.let { srcName ->
+                    UniversalSendToDialog(
+                        sourceName = srcName,
+                        viewModel = viewModel,
+                        onDismiss = { activeSendToSourceName = null }
+                    )
+                }
+
+                // Universal Send To Toast Notification Banner
+                lastSendToEvent?.let { event ->
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(12.dp)
+                            .align(Alignment.TopCenter)
+                    ) {
+                        SendToToastNotificationBanner(
+                            event = event,
+                            onDismiss = { viewModel.clearLastSendToEvent() }
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+// -----------------------------------------------------------------
+// MASTER SYNCHRONIZED PLAYBACK CONTROLLER BAR & VIEWER CARDS
+// -----------------------------------------------------------------
+@Composable
+fun MasterSynchronizedPlaybackBar(
+    viewModel: WorkstationViewModel,
+    onOpenSendToDialog: (sourceName: String) -> Unit = {}
+) {
+    val isPlaying by viewModel.isStemPlaybackActive.collectAsStateWithLifecycle()
+    val posMs by viewModel.playbackPositionMs.collectAsStateWithLifecycle()
+    val currentChordModel by viewModel.currentChord.collectAsStateWithLifecycle()
+    val currentSection by viewModel.currentSongSection.collectAsStateWithLifecycle()
+    val pitchShift by viewModel.pitchShiftSemitones.collectAsStateWithLifecycle()
+    val isLooping by viewModel.isLoopingEnabled.collectAsStateWithLifecycle()
+    val speedMultiplier by viewModel.tempoPreservedMultiplier.collectAsStateWithLifecycle()
+    val bpm by viewModel.bpm.collectAsStateWithLifecycle()
+
+    val formattedCurrentTime = String.format("%02d:%02d.%d", (posMs / 1000) / 60, (posMs / 1000) % 60, (posMs % 1000) / 100)
+    val formattedTotalTime = "00:24.0"
+
+    Surface(
+        color = Color(0xFF070F1C),
+        border = BorderStroke(1.dp, Color(0xFF132F52)),
+        shadowElevation = 8.dp,
+        modifier = Modifier.fillMaxWidth().testTag("master_synchronized_playback_bar")
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 10.dp, vertical = 4.dp)
+        ) {
+            // Master Progress Seekbar Slider & Time Labels
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(
+                    text = formattedCurrentTime,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Monospace,
+                    color = Color(0xFF00E5FF)
+                )
+
+                Slider(
+                    value = posMs.toFloat(),
+                    onValueChange = { viewModel.setPlaybackPosition(it.toLong()) },
+                    valueRange = 0f..24000f,
+                    colors = SliderDefaults.colors(
+                        thumbColor = Color(0xFF00E5FF),
+                        activeTrackColor = Color(0xFF00E5FF),
+                        inactiveTrackColor = Color(0xFF1E293B)
+                    ),
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(20.dp)
+                        .padding(horizontal = 6.dp)
+                )
+
+                Text(
+                    text = formattedTotalTime,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Monospace,
+                    color = Color(0xFF94A3B8)
+                )
+            }
+
+            // Transport Controls & Synchronized Status Badges
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // Left: Transport Buttons (Rewind, Play/Pause, Forward, Loop)
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(2.dp)
+                ) {
+                    IconButton(
+                        onClick = { viewModel.stepPlaybackBackward(1000L) },
+                        modifier = Modifier.size(28.dp)
+                    ) {
+                        Icon(Icons.Default.Replay, "Rewind 1s", tint = Color(0xFF94A3B8), modifier = Modifier.size(16.dp))
+                    }
+
+                    Surface(
+                        shape = CircleShape,
+                        color = if (isPlaying) Color(0xFF00E5FF) else Color(0xFF1E293B),
+                        onClick = { viewModel.toggleMasterPlayback() },
+                        modifier = Modifier.size(32.dp)
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(
+                                imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                                contentDescription = if (isPlaying) "Pause All" else "Play All",
+                                tint = if (isPlaying) Color(0xFF0A0F1D) else Color.White,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                    }
+
+                    IconButton(
+                        onClick = { viewModel.stepPlaybackForward(1000L) },
+                        modifier = Modifier.size(28.dp)
+                    ) {
+                        Icon(Icons.Default.FastForward, "Forward 1s", tint = Color(0xFF94A3B8), modifier = Modifier.size(16.dp))
+                    }
+
+                    IconButton(
+                        onClick = { viewModel.toggleLooping() },
+                        modifier = Modifier.size(28.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Repeat,
+                            contentDescription = "Loop",
+                            tint = if (isLooping) Color(0xFF10B981) else Color(0xFF64748B),
+                            modifier = Modifier.size(16.dp)
                         )
                     }
                 }
 
-                // Main Trigger FAB
-                ExtendedFloatingActionButton(
-                    onClick = { isFabExpanded = !isFabExpanded },
-                    containerColor = MaterialTheme.colorScheme.secondary,
-                    contentColor = MaterialTheme.colorScheme.onSecondary,
-                    elevation = FloatingActionButtonDefaults.elevation(defaultElevation = 8.dp),
-                    icon = { Icon(if (isFabExpanded) Icons.Default.Close else Icons.Default.Add, "Action button") },
-                    text = { Text(if (isFabExpanded) "Cancel" else "Quick Actions", fontWeight = FontWeight.Bold, letterSpacing = 0.5.sp) },
-                    modifier = Modifier.testTag("quick_action_fab")
+                // Middle: Synchronized Badges (Current Chord, Song Section, Pitch, Speed)
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    // Active Chord Badge
+                    Surface(
+                        shape = RoundedCornerShape(4.dp),
+                        color = Color(0xFF241C04),
+                        border = BorderStroke(1.dp, Color(0xFFD4AF37).copy(alpha = 0.5f))
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
+                        ) {
+                            Icon(Icons.Default.MusicNote, "Chord", tint = Color(0xFFD4AF37), modifier = Modifier.size(10.dp))
+                            Spacer(modifier = Modifier.width(2.dp))
+                            Text(
+                                text = currentChordModel?.name ?: "—",
+                                fontSize = 9.sp,
+                                fontWeight = FontWeight.Black,
+                                color = Color(0xFFD4AF37)
+                            )
+                        }
+                    }
+
+                    // Song Section Badge
+                    currentSection?.let { section ->
+                        Surface(
+                            shape = RoundedCornerShape(4.dp),
+                            color = Color(section.colorHex).copy(alpha = 0.2f),
+                            border = BorderStroke(1.dp, Color(section.colorHex))
+                        ) {
+                            Text(
+                                text = section.title.uppercase(),
+                                fontSize = 9.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(section.colorHex),
+                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
+                            )
+                        }
+                    }
+
+                    // Pitch Shift / Key Transpose Badge
+                    Surface(
+                        shape = RoundedCornerShape(4.dp),
+                        color = Color(0xFF1E1035),
+                        border = BorderStroke(1.dp, Color(0xFFA855F7).copy(alpha = 0.5f)),
+                        onClick = {
+                            val nextShift = if (pitchShift >= 6) -6 else pitchShift + 1
+                            viewModel.setPitchShift(nextShift)
+                        }
+                    ) {
+                        Text(
+                            text = if (pitchShift == 0) "ORIGINAL KEY" else "${if (pitchShift > 0) "+$pitchShift" else pitchShift}ST",
+                            fontSize = 8.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFFA855F7),
+                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
+                        )
+                    }
+
+                    // Speed Badge
+                    Surface(
+                        shape = RoundedCornerShape(4.dp),
+                        color = Color(0xFF0F261C),
+                        border = BorderStroke(1.dp, Color(0xFF10B981).copy(alpha = 0.5f)),
+                        onClick = {
+                            val nextSpeed = when {
+                                speedMultiplier >= 2.0f -> 0.5f
+                                speedMultiplier >= 1.5f -> 2.0f
+                                speedMultiplier >= 1.25f -> 1.5f
+                                speedMultiplier >= 1.0f -> 1.25f
+                                speedMultiplier >= 0.75f -> 1.0f
+                                else -> 0.75f
+                            }
+                            viewModel.setSpeedMultiplier(nextSpeed)
+                        }
+                    ) {
+                        Text(
+                            text = "${speedMultiplier}x",
+                            fontSize = 8.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFF10B981),
+                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
+                        )
+                    }
+                }
+
+                // Right: Universal Send To Button
+                UniversalSendToButton(
+                    sourceName = "Synchronized Master Audio Stream (${currentChordModel?.name ?: "Mix"})",
+                    buttonText = "SEND TO",
+                    accentColor = Color(0xFF00E5FF),
+                    onOpenSendToDialog = onOpenSendToDialog
                 )
             }
         }
-    ) { innerPadding ->
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(innerPadding)
-        ) {
-            // Section Switcher
-            when (currentSection) {
-                "Home" -> DashboardTab(
-                    viewModel = viewModel,
-                    onOpenRecorder = { showRecorderModal = true },
-                    onOpenImport = { showImportModal = true }
-                )
-                "Analyzer" -> RealtimeAnalyzerTab(viewModel = viewModel)
-                "Studio" -> StudioAudioSeparationTab(viewModel = viewModel)
-                "Library" -> LibrarySessionTab(viewModel = viewModel)
-                "Settings" -> SettingsTab(viewModel = viewModel)
-            }
+    }
+}
 
-            // MODALS / DIALOGS
-            if (showRecorderModal) {
-                AudioRecorderDialog(
-                    viewModel = viewModel,
-                    onDismiss = { showRecorderModal = false }
-                )
-            }
+@Composable
+fun SongSectionViewerCard(viewModel: WorkstationViewModel) {
+    val sections by viewModel.songSections.collectAsStateWithLifecycle()
+    val activeSection by viewModel.currentSongSection.collectAsStateWithLifecycle()
 
-            if (showAddSessionModal) {
-                AddSessionDialog(
-                    viewModel = viewModel,
-                    onDismiss = { showAddSessionModal = false }
-                )
-            }
+    Card(
+        colors = CardDefaults.cardColors(containerColor = Color(0xFF0E1729)),
+        border = BorderStroke(1.dp, Color(0xFF132F52)),
+        shape = RoundedCornerShape(12.dp),
+        modifier = Modifier.fillMaxWidth().testTag("song_sections_timeline_card")
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.Segment, contentDescription = null, tint = Color(0xFFA855F7), modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "SONG SECTIONS TIMELINE",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Black,
+                        color = Color.White,
+                        letterSpacing = 1.sp
+                    )
+                }
 
-            if (showImportModal) {
-                ImportAudioDialog(
-                    viewModel = viewModel,
-                    onDismiss = { showImportModal = false }
-                )
-            }
-
-            if (showSearchDialog) {
-                TopBarSearchDialog(
-                    viewModel = viewModel,
-                    onDismiss = { showSearchDialog = false }
+                Text(
+                    text = "TAP TO SEEK",
+                    fontSize = 9.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = Color(0xFF94A3B8)
                 )
             }
 
-            if (showNotificationsDialog) {
-                TopBarNotificationsDialog(
-                    onDismiss = { showNotificationsDialog = false }
-                )
+            Spacer(modifier = Modifier.height(10.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                sections.forEach { section ->
+                    val isActive = activeSection?.title == section.title
+                    val sectionColor = Color(section.colorHex)
+                    val bg = if (isActive) sectionColor.copy(alpha = 0.25f) else Color(0xFF13233C)
+                    val border = BorderStroke(if (isActive) 2.dp else 1.dp, if (isActive) sectionColor else Color(0xFF1E293B))
+
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = bg,
+                        border = border,
+                        onClick = { viewModel.setPlaybackPosition(section.startMs) },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            modifier = Modifier.padding(vertical = 8.dp, horizontal = 4.dp)
+                        ) {
+                            Text(
+                                text = section.title,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = if (isActive) Color.White else sectionColor,
+                                maxLines = 1
+                            )
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = String.format("%02d:%02d", section.startMs / 1000 / 60, section.startMs / 1000 % 60),
+                                fontSize = 8.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = Color(0xFF94A3B8)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun SyncedLyricsViewerCard(viewModel: WorkstationViewModel) {
+    val lyrics by viewModel.syncedLyrics.collectAsStateWithLifecycle()
+    val activeIdx by viewModel.activeLyricIndex.collectAsStateWithLifecycle()
+    val currentSection by viewModel.currentSongSection.collectAsStateWithLifecycle()
+
+    Card(
+        colors = CardDefaults.cardColors(containerColor = Color(0xFF0E1729)),
+        border = BorderStroke(1.dp, Color(0xFF132F52)),
+        shape = RoundedCornerShape(12.dp),
+        modifier = Modifier.fillMaxWidth().testTag("synced_lyrics_viewer_card")
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.Subtitles, contentDescription = null, tint = Color(0xFF00E5FF), modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "SYNCED KARAOKE LYRICS & CHORDS",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Black,
+                        color = Color.White,
+                        letterSpacing = 1.sp
+                    )
+                }
+
+                currentSection?.let { section ->
+                    Text(
+                        text = "SECTION: ${section.title.uppercase()}",
+                        fontSize = 9.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color(section.colorHex)
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            lyrics.forEachIndexed { index, line ->
+                val isActive = index == activeIdx
+                val bgColor = if (isActive) Color(0xFF00E5FF).copy(alpha = 0.15f) else Color.Transparent
+                val border = if (isActive) BorderStroke(1.dp, Color(0xFF00E5FF).copy(alpha = 0.5f)) else null
+
+                Surface(
+                    shape = RoundedCornerShape(6.dp),
+                    color = bgColor,
+                    border = border,
+                    onClick = { viewModel.setPlaybackPosition(line.startMs) },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 2.dp)
+                ) {
+                    Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)) {
+                        Text(
+                            text = line.chordsAbove,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Black,
+                            color = if (isActive) Color(0xFFD4AF37) else Color(0xFF64748B),
+                            fontFamily = FontFamily.Monospace
+                        )
+                        Text(
+                            text = line.text,
+                            fontSize = 11.sp,
+                            fontWeight = if (isActive) FontWeight.Bold else FontWeight.Normal,
+                            color = if (isActive) Color.White else Color(0xFF94A3B8)
+                        )
+                    }
+                }
             }
         }
     }
@@ -857,7 +1358,8 @@ fun WorkstationBottomNavigation(
 fun DashboardTab(
     viewModel: WorkstationViewModel,
     onOpenRecorder: () -> Unit,
-    onOpenImport: () -> Unit
+    onOpenImport: () -> Unit,
+    onOpenSendToDialog: (sourceName: String) -> Unit = {}
 ) {
     val currentChordModel by viewModel.currentChord.collectAsStateWithLifecycle()
     val currentBpm by viewModel.bpm.collectAsStateWithLifecycle()
@@ -927,15 +1429,26 @@ fun DashboardTab(
                                 letterSpacing = 2.sp
                             )
                         }
-                        Text(
-                            text = "OFFLINE MODE",
-                            fontSize = 10.sp,
-                            color = Color(0xFFB0BEC5),
-                            fontWeight = FontWeight.Bold,
-                            modifier = Modifier
-                                .background(Color(0xFF13233C), RoundedCornerShape(4.dp))
-                                .padding(horizontal = 6.dp, vertical = 2.dp)
-                        )
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            UniversalSendToButton(
+                                sourceName = uploadedFileName ?: "Master Active Audio Stream",
+                                buttonText = "SEND STREAM",
+                                accentColor = Color(0xFF00E5FF),
+                                onOpenSendToDialog = onOpenSendToDialog
+                            )
+                            Text(
+                                text = "OFFLINE MODE",
+                                fontSize = 10.sp,
+                                color = Color(0xFFB0BEC5),
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier
+                                    .background(Color(0xFF13233C), RoundedCornerShape(4.dp))
+                                    .padding(horizontal = 6.dp, vertical = 2.dp)
+                            )
+                        }
                     }
 
                     Spacer(modifier = Modifier.height(14.dp))
@@ -1016,6 +1529,21 @@ fun DashboardTab(
                     )
                 }
             }
+        }
+
+        // Universal Audio Sharing Engine Card
+        item {
+            UniversalAudioSharingEngineCard(viewModel = viewModel)
+        }
+
+        // Song Sections Timeline
+        item {
+            SongSectionViewerCard(viewModel = viewModel)
+        }
+
+        // Synced Karaoke Lyrics & Chords
+        item {
+            SyncedLyricsViewerCard(viewModel = viewModel)
         }
 
         // Prominent Global Key Signature Analyzer
@@ -1887,7 +2415,8 @@ fun SessionWorkstationItemRow(
     session: ProjectSession,
     onDelete: () -> Unit,
     onExport: () -> Unit,
-    onExportMidi: () -> Unit
+    onExportMidi: () -> Unit,
+    onOpenSendToDialog: (sourceName: String) -> Unit = {}
 ) {
     Card(
         colors = CardDefaults.cardColors(containerColor = Color(0xFF0E1729)),
@@ -1919,32 +2448,42 @@ fun SessionWorkstationItemRow(
                     )
                 }
 
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    UniversalSendToButton(
+                        sourceName = session.title,
+                        buttonText = "SEND TO",
+                        accentColor = Color(0xFF00E5FF),
+                        onOpenSendToDialog = onOpenSendToDialog
+                    )
+
                     // MIDI Export Icon
-                    IconButton(onClick = onExportMidi, modifier = Modifier.size(36.dp)) {
+                    IconButton(onClick = onExportMidi, modifier = Modifier.size(32.dp)) {
                         Icon(
                             Icons.Default.MusicNote,
                             contentDescription = "Export MIDI",
                             tint = Color(0xFF00E5FF),
-                            modifier = Modifier.size(18.dp)
+                            modifier = Modifier.size(16.dp)
                         )
                     }
                     // Export Icon
-                    IconButton(onClick = onExport, modifier = Modifier.size(36.dp)) {
+                    IconButton(onClick = onExport, modifier = Modifier.size(32.dp)) {
                         Icon(
                             Icons.Default.Download,
                             contentDescription = "Export Report",
                             tint = Color(0xFFD4AF37),
-                            modifier = Modifier.size(18.dp)
+                            modifier = Modifier.size(16.dp)
                         )
                     }
                     // Delete Icon
-                    IconButton(onClick = onDelete, modifier = Modifier.size(36.dp)) {
+                    IconButton(onClick = onDelete, modifier = Modifier.size(32.dp)) {
                         Icon(
                             Icons.Default.Delete,
                             contentDescription = "Delete",
                             tint = Color(0xFFEF5350).copy(alpha = 0.8f),
-                            modifier = Modifier.size(18.dp)
+                            modifier = Modifier.size(16.dp)
                         )
                     }
                 }
@@ -1974,401 +2513,1044 @@ fun SessionWorkstationItemRow(
 }
 
 // -----------------------------------------------------------------
-// 5. ANALYZER TAB - CHORD & FREQUENCIES SPECTROGRAM
+// 5. ANALYZER TAB - CHORD & FREQUENCIES SPECTROGRAM (CHORD AI PRO)
 // -----------------------------------------------------------------
+data class ChordPadInfo(val symbol: String, val degree: String)
+
 @Composable
-fun RealtimeAnalyzerTab(viewModel: WorkstationViewModel) {
+fun RealtimeAnalyzerTab(
+    viewModel: WorkstationViewModel,
+    onOpenSendToDialog: (sourceName: String) -> Unit = {}
+) {
     val currentChordModel by viewModel.currentChord.collectAsStateWithLifecycle()
     val activeNotes by viewModel.liveNotesBuffer.collectAsStateWithLifecycle()
     val detectedArpeggio by viewModel.detectedArpeggio.collectAsStateWithLifecycle()
-    val modeSelected by viewModel.detectionMode.collectAsStateWithLifecycle()
+    val isPlaying by viewModel.isStemPlaybackActive.collectAsStateWithLifecycle()
+    val playPositionMs by viewModel.playbackPositionMs.collectAsStateWithLifecycle()
+    val showClassification by viewModel.showHarmonicClassification.collectAsStateWithLifecycle()
+    val activePerformanceNotes by viewModel.activePerformanceNotes.collectAsStateWithLifecycle()
+    val performanceNoteStream by viewModel.performanceNoteStream.collectAsStateWithLifecycle()
 
-    var activeFretboardSelection by remember { mutableStateOf(true) } // or piano key layout
+    var isGridViewEnabled by remember { mutableStateOf(true) }
+    var chordsMode by remember { mutableStateOf("Basic") } // "Basic" or "Precise"
+    var voicingsEnabled by remember { mutableStateOf(true) } // true: single keyboard, false: dual keyboard
+    var transposeSemi by remember { mutableStateOf(-1) }
+    var isLooping by remember { mutableStateOf(false) }
+    var speedMultiplier by remember { mutableStateOf(1.0f) }
 
-    // Realtime canvas animator ticker
-    var refreshTick by remember { mutableStateOf(0) }
-    LaunchedEffect(Unit) {
-        while (true) {
-            delay(50)
-            refreshTick += 1
-        }
+    val currentChordName = currentChordModel?.name ?: "Chord ai"
+    val currentChordSymbol = currentChordModel?.root ?: "Chord ai"
+    val chordDegree = when (currentChordSymbol) {
+        "F#", "F#add9" -> "III"
+        "B", "Badd9" -> "VI"
+        "C#" -> "VII"
+        "D#m", "D#m7" -> "I"
+        "A#m" -> "V"
+        "G#m" -> "IV"
+        else -> "I"
     }
 
-    Column(
+    Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color(0xFF030A16))
-            .verticalScroll(rememberScrollState())
-            .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp)
+            .background(Color(0xFF070F1A))
     ) {
-        // Mode Selector (Exact, Inferred, Combined)
-        Card(
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-            shape = RoundedCornerShape(12.dp),
-            modifier = Modifier.fillMaxWidth()
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
         ) {
-            Column(modifier = Modifier.padding(12.dp)) {
-                Text(
-                    text = "ANALYSIS MODE",
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = Color(0xFFB0BEC5),
-                    letterSpacing = 1.sp
-                )
-                Spacer(modifier = Modifier.height(8.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    val modes = listOf("Exact Notes", "Inferred Harmony", "Combined Analysis")
-                    modes.forEach { mode ->
-                        val isSel = modeSelected == mode
-                        Button(
-                            onClick = { viewModel.engine.setDetectionMode(mode) },
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = if (isSel) Color(0xFF00E5FF) else Color(0xFF13233C),
-                                contentColor = if (isSel) Color.Black else Color.White
-                            ),
-                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-                            shape = RoundedCornerShape(8.dp),
-                            modifier = Modifier
-                                .weight(1f)
-                                .height(38.dp)
-                        ) {
-                            Text(text = mode, fontSize = 10.sp, fontWeight = FontWeight.Bold)
-                        }
+            // 1. TOP HEADER BAR
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(Color(0xFF0D1525))
+                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(onClick = { viewModel.setSection("Home") }, modifier = Modifier.size(36.dp)) {
+                        Icon(Icons.Default.Home, contentDescription = "Home", tint = Color.White, modifier = Modifier.size(20.dp))
+                    }
+                    Spacer(modifier = Modifier.width(4.dp))
+                    IconButton(onClick = { /* playlist view */ }, modifier = Modifier.size(36.dp)) {
+                        Icon(Icons.Default.List, contentDescription = "Playlist", tint = Color.White, modifier = Modifier.size(20.dp))
                     }
                 }
-            }
-        }
 
-        // Real-Time Playback-Linked Chord Timeline Module
-        RealtimePlaybackChordTimeline(viewModel = viewModel)
-
-        // Active Identified Chord Details Card
-        Card(
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
-            border = BorderStroke(1.dp, Color(0xFFD4AF37).copy(alpha = 0.5f)),
-            shape = RoundedCornerShape(16.dp),
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Column(modifier = Modifier.padding(16.dp)) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column {
-                        Text(
-                            text = "CURRENT RECOGNITION",
-                            fontSize = 10.sp,
-                            color = Color(0xFFB0BEC5),
-                            fontWeight = FontWeight.Bold,
-                            letterSpacing = 1.sp
-                        )
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            text = currentChordModel?.name ?: "DETECTING...",
-                            fontSize = 28.sp,
-                            fontWeight = FontWeight.Black,
-                            color = Color(0xFFD4AF37)
-                        )
-                    }
-
-                    Box(
-                        modifier = Modifier
-                            .background(Color(0xFF1B2E49), RoundedCornerShape(6.dp))
-                            .padding(8.dp),
-                        contentAlignment = Alignment.Center
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(
+                        onClick = { /* Instruments toggle */ },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF13233C)),
+                        border = BorderStroke(1.dp, Color(0xFF1E3A60)),
+                        shape = RoundedCornerShape(20.dp),
+                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 4.dp),
+                        modifier = Modifier.height(30.dp)
                     ) {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Text(text = "CONFIDENCE", fontSize = 8.sp, color = Color(0xFFB0BEC5))
-                            Text(
-                                text = String.format("%.0f%%", (currentChordModel?.confidence ?: 0f) * 100),
-                                fontSize = 14.sp,
-                                fontWeight = FontWeight.Black,
-                                color = Color(0xFF00E5FF)
-                            )
-                        }
+                        Text("Instruments", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
                     }
-                }
 
-                Spacer(modifier = Modifier.height(12.dp))
-
-                Divider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f))
-
-                Spacer(modifier = Modifier.height(12.dp))
-
-                // Chord properties
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Column {
-                        Text(text = "ROOT NOTE", fontSize = 9.sp, color = Color(0xFFB0BEC5))
-                        Text(text = currentChordModel?.root ?: "-", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                    Button(
+                        onClick = { /* Lyrics toggle */ },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF13233C)),
+                        border = BorderStroke(1.dp, Color(0xFF1E3A60)),
+                        shape = RoundedCornerShape(20.dp),
+                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 4.dp),
+                        modifier = Modifier.height(30.dp)
+                    ) {
+                        Text("Lyrics", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
                     }
-                    Column {
-                        Text(text = "FORMULA", fontSize = 9.sp, color = Color(0xFFB0BEC5))
-                        Text(text = currentChordModel?.formula ?: "-", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = Color.White)
+
+                    IconButton(onClick = { /* overflow */ }, modifier = Modifier.size(30.dp)) {
+                        Icon(Icons.Default.MoreVert, contentDescription = "More", tint = Color.White, modifier = Modifier.size(18.dp))
                     }
-                    Column {
-                        Text(text = "CLASSIFICATION", fontSize = 9.sp, color = Color(0xFFB0BEC5))
-                        Text(text = currentChordModel?.type ?: "-", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = Color.White)
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(12.dp))
-
-                Text(
-                    text = "Detected Active Frequencies: ${currentChordModel?.frequency} Hz",
-                    fontSize = 11.sp,
-                    color = Color(0xFF5E718B)
-                )
-
-                Spacer(modifier = Modifier.height(4.dp))
-
-                val javaInferredDescription = currentChordModel?.name?.let {
-                    com.example.util.MusicTheoryHelper.getKeySignatureDescription(it)
-                } ?: ""
-
-                Text(
-                    text = (currentChordModel?.description ?: "") + " " + javaInferredDescription,
-                    fontSize = 11.sp,
-                    color = Color(0xFFB0BEC5),
-                    lineHeight = 16.sp
-                )
-
-                if (currentChordModel != null && currentChordModel!!.suggestedSubstitutions.isNotEmpty()) {
-                    Spacer(modifier = Modifier.height(12.dp))
-                    Text(
-                        text = "Suggested Chord Substitutions: " + currentChordModel!!.suggestedSubstitutions.joinToString(", "),
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = Color(0xFF00E5FF)
-                    )
                 }
             }
-        }
 
-        // Live bouncing FFT spectrum visualizer
-        Card(
-            colors = CardDefaults.cardColors(containerColor = Color(0xFF040B18)),
-            border = BorderStroke(1.dp, Color(0xFF00E5FF).copy(alpha = 0.3f)),
-            shape = RoundedCornerShape(12.dp),
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Column(modifier = Modifier.padding(12.dp)) {
-                Text(
-                    text = "REAL-TIME FFT FREQUENCY SPECTRUM",
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = Color(0xFF00E5FF),
-                    letterSpacing = 1.sp
-                )
-                Spacer(modifier = Modifier.height(12.dp))
-                Box(
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // 2. MAIN DISPLAY (GRID OR WAVEFORM)
+            if (isGridViewEnabled) {
+                // Chord Pad Grid
+                Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(80.dp)
+                        .padding(horizontal = 12.dp)
                 ) {
-                    val visualAmplitudes = remember(refreshTick) { viewModel.engine.generateRealtimeFFTAmplitudes(32) }
-                    Canvas(modifier = Modifier.fillMaxSize()) {
-                        val spacing = size.width / visualAmplitudes.size
-                        for (i in visualAmplitudes.indices) {
-                            val barHeight = visualAmplitudes[i] * size.height
-                            // Vertical bar drawing
-                            drawRect(
-                                brush = Brush.verticalGradient(
-                                    colors = listOf(Color(0xFF00E5FF), Color(0xFF0C1D3A))
-                                ),
-                                topLeft = Offset(i * spacing, size.height - barHeight),
-                                size = Size(spacing * 0.7f, barHeight)
+                    // Top Wide Card: e.g. D#m
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = Color(0xFF8B8A7E)),
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(75.dp)
+                            .clickable { viewModel.engine.selectChord("D#m") }
+                    ) {
+                        Box(modifier = Modifier.fillMaxSize().padding(12.dp)) {
+                            Column(modifier = Modifier.align(Alignment.TopStart)) {
+                                Text(
+                                    text = "D#m",
+                                    fontSize = 18.sp,
+                                    fontWeight = FontWeight.Black,
+                                    color = Color.White
+                                )
+                                Text(
+                                    text = "I",
+                                    fontSize = 11.sp,
+                                    color = Color.White.copy(alpha = 0.8f)
+                                )
+                            }
+                            Icon(
+                                imageVector = Icons.Default.KeyboardArrowDown,
+                                contentDescription = "Dropdown",
+                                tint = Color.White,
+                                modifier = Modifier.align(Alignment.BottomEnd).size(22.dp)
                             )
                         }
                     }
-                }
-            }
-        }
 
-        // Interactive Note Keyboard trigger panel
-        Card(
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
-            shape = RoundedCornerShape(12.dp),
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Column(modifier = Modifier.padding(12.dp)) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = "VIRTUAL INSTRUMENT INTAKE (OFFLINE STIMULUS)",
-                        fontSize = 10.sp,
-                        color = Color(0xFFB0BEC5),
-                        fontWeight = FontWeight.Bold
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    // Grid layout of chord pads
+                    val pads = listOf(
+                        listOf(ChordPadInfo("F#", "III"), ChordPadInfo("", ""), ChordPadInfo("", ""), ChordPadInfo("B", "VI")),
+                        listOf(ChordPadInfo("B", "VI"), ChordPadInfo("", ""), ChordPadInfo("", ""), ChordPadInfo("", "")),
+                        listOf(ChordPadInfo("B", "VI"), ChordPadInfo("", ""), ChordPadInfo("", ""), ChordPadInfo("", "")),
+                        listOf(ChordPadInfo("B", "VI"), ChordPadInfo("", ""), ChordPadInfo("", ""), ChordPadInfo("C#", "VII")),
+                        listOf(ChordPadInfo("D#m7", "I"), ChordPadInfo("", ""), ChordPadInfo("", ""), ChordPadInfo("", ""))
                     )
-                    TextButton(onClick = { viewModel.engine.clearLiveNotes() }) {
-                        Text("Reset", color = Color(0xFFEF5350), fontSize = 11.sp)
-                    }
-                }
 
-                if (activeNotes.isNotEmpty()) {
-                    Text(
-                        text = "History of sequential inputs: ${activeNotes.joinToString(" ➛ ")}",
-                        fontSize = 11.sp,
-                        color = Color(0xFF00E5FF),
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier.padding(bottom = 8.dp)
-                    )
-                } else {
-                    Text(
-                        text = "Tap keys below sequentially to test chord/arpeggio inference engine, including specialized African riffs!",
-                        fontSize = 11.sp,
-                        color = Color(0xFF5E718B),
-                        modifier = Modifier.padding(bottom = 8.dp)
-                    )
-                }
-
-                // Selector tabs: Guitar vs Piano layout
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
-                    Row(
-                        modifier = Modifier
-                            .background(Color(0xFF0A111F), RoundedCornerShape(20.dp))
-                            .padding(2.dp)
-                    ) {
-                        TabSelectionPill(text = "Piano Visualizer", isSel = !activeFretboardSelection, onClick = { activeFretboardSelection = false })
-                        TabSelectionPill(text = "Guitar Fretboard", isSel = activeFretboardSelection, onClick = { activeFretboardSelection = true })
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(12.dp))
-
-                if (activeFretboardSelection) {
-                    // Guitar Fretboards renderer (6 string, 12 frets)
-                    GuitarFretboardRenderer(
-                        selectedChords = currentChordModel,
-                        onNoteClick = { viewModel.engine.tapLiveMusicalNote(it) }
-                    )
-                } else {
-                    // Piano renderer
-                    PianoKeyboardRenderer(
-                        activeMatchingNotes = currentChordModel?.notes ?: emptyList(),
-                        onKeyClick = { viewModel.engine.tapLiveMusicalNote(it) }
-                    )
-                }
-            }
-        }
-
-        // Chromatic Guitar Tuner module box
-        Card(
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
-            shape = RoundedCornerShape(12.dp),
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            val tunerState by viewModel.tunerState.collectAsStateWithLifecycle()
-            Column(modifier = Modifier.padding(16.dp)) {
-                Text(
-                    text = "CHROMATIC TUNER CENTER",
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = Color(0xFFB0BEC5),
-                    letterSpacing = 1.sp
-                )
-                
-                Spacer(modifier = Modifier.height(12.dp))
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    // Active note & target
-                    Column {
-                        Text(
-                            text = tunerState.noteName,
-                            fontSize = 32.sp,
-                            fontWeight = FontWeight.Black,
-                            color = if (tunerState.isTuned) Color.Green else Color(0xFF00E5FF)
-                        )
-                        Text(
-                            text = "Target: ${tunerState.targetFreq} Hz",
-                            fontSize = 11.sp,
-                            color = Color(0xFFB0BEC5)
-                        )
-                    }
-
-                    // Meter Dial representation (Circular dial arc simulation)
-                    Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = String.format("%+2.0f Cents", tunerState.deviationCents),
-                            fontSize = 14.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = if (tunerState.isTuned) Color.Green else Color(0xFFD4AF37)
-                        )
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Box(
+                    pads.forEach { row ->
+                        Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .height(25.dp)
+                                .padding(vertical = 4.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            Canvas(modifier = Modifier.fillMaxSize()) {
-                                // Deviation scale line
-                                drawLine(Color(0xFF5E718B), Offset(0f, size.height/2), Offset(size.width, size.height/2), strokeWidth = 3f)
-                                // Center line (tuned reference point)
-                                drawLine(Color.Green, Offset(size.width/2, 0f), Offset(size.width/2, size.height), strokeWidth = 6f)
-                                
-                                // Current cursor
-                                val centFraction = (tunerState.deviationCents / 50f).coerceIn(-1.0f, 1.0f)
-                                val posX = size.width/2 + (size.width/2 * centFraction)
-                                drawCircle(
-                                    color = if (tunerState.isTuned) Color.Green else Color(0xFFFF9100),
-                                    radius = 12f,
-                                    center = Offset(posX, size.height/2)
+                            row.forEach { pad ->
+                                val isActive = pad.symbol.isNotEmpty() && currentChordSymbol == pad.symbol
+                                Card(
+                                    colors = CardDefaults.cardColors(
+                                        containerColor = if (isActive) Color(0xFF2E3E50) else if (pad.symbol.isNotEmpty()) Color(0xFF1E242C) else Color(0xFF141A22)
+                                    ),
+                                    border = BorderStroke(
+                                        width = 1.dp,
+                                        color = if (isActive) Color(0xFF00E5FF) else if (pad.symbol.isNotEmpty()) Color(0xFF2E343E) else Color(0xFF1B222D)
+                                    ),
+                                    shape = RoundedCornerShape(8.dp),
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .height(72.dp)
+                                        .clickable(enabled = pad.symbol.isNotEmpty()) {
+                                            viewModel.engine.selectChord(pad.symbol)
+                                        }
+                                ) {
+                                    if (pad.symbol.isNotEmpty()) {
+                                        Column(
+                                            modifier = Modifier
+                                                .fillMaxSize()
+                                                .padding(8.dp),
+                                            verticalArrangement = Arrangement.SpaceBetween
+                                        ) {
+                                            Text(
+                                                text = pad.symbol,
+                                                fontSize = 15.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = Color.White
+                                            )
+                                            Text(
+                                                text = pad.degree,
+                                                fontSize = 10.sp,
+                                                color = Color(0xFF94A3B8)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                // Waveform / Chord Analysis view (Screenshot 4)
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 16.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = Color(0xFF0E1A2B)),
+                        border = BorderStroke(1.dp, Color(0xFF00E5FF).copy(alpha = 0.5f)),
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 12.dp)
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(14.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "Chord analysis",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color.White
                                 )
+                                Text(
+                                    text = "Analyzing...",
+                                    fontSize = 9.sp,
+                                    color = Color(0xFF00E5FF)
+                                )
+                            }
+                            Spacer(modifier = Modifier.height(8.dp))
+                            LinearProgressIndicator(
+                                progress = { 0.65f },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(4.dp)
+                                    .clip(RoundedCornerShape(2.dp)),
+                                color = Color(0xFF00E5FF),
+                                trackColor = Color(0xFF1E293B)
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(24.dp))
+
+                    // Audio Waveform Timeline Canvas
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(100.dp)
+                            .background(Color(0xFF020617), RoundedCornerShape(8.dp))
+                            .border(1.dp, Color(0xFF1E293B), RoundedCornerShape(8.dp)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Canvas(modifier = Modifier.fillMaxSize()) {
+                            val barCount = 60
+                            val spacing = size.width / barCount
+                            val centerY = size.height / 2
+                            
+                            drawLine(
+                                color = Color(0xFF1E293B),
+                                start = Offset(0f, centerY),
+                                end = Offset(size.width, centerY),
+                                strokeWidth = 2f
+                            )
+
+                            drawLine(
+                                color = Color.White,
+                                start = Offset(size.width / 2, 0f),
+                                end = Offset(size.width / 2, size.height),
+                                strokeWidth = 3f
+                            )
+
+                            for (i in 0 until barCount) {
+                                val amplitudeFraction = sin(i * 0.15f) * 0.4f + 0.5f
+                                val barHeight = (amplitudeFraction * size.height * 0.6f).toFloat()
+                                val posX = i * spacing
+                                
+                                drawLine(
+                                    color = if (i < barCount / 2) Color(0xFF00E5FF).copy(alpha = 0.6f) else Color(0xFF475569).copy(alpha = 0.4f),
+                                    start = Offset(posX, centerY - barHeight / 2),
+                                    end = Offset(posX, centerY + barHeight / 2),
+                                    strokeWidth = 3f
+                                )
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(24.dp))
+
+                    Text(
+                        text = "Chord ai",
+                        fontSize = 28.sp,
+                        fontWeight = FontWeight.Black,
+                        color = Color(0xFF00E5FF),
+                        letterSpacing = 1.sp
+                    )
+
+                    Text(
+                        text = "AI real-time chord detection engine active",
+                        fontSize = 11.sp,
+                        color = Color(0xFF64748B)
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // 3. CONTROL BUTTONS BAR (CHORDS, VOICINGS, GRID VIEW)
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                // Card 1: Chords
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFF101C2E)),
+                    border = BorderStroke(1.dp, Color(0xFF1E2E44)),
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier.weight(1.1f)
+                ) {
+                    Column(
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.Center,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("Chords", color = Color(0xFF94A3B8), fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                            Spacer(modifier = Modifier.width(3.dp))
+                            Icon(
+                                Icons.Default.Info,
+                                contentDescription = "Info",
+                                tint = Color(0xFF94A3B8),
+                                modifier = Modifier.size(10.dp)
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(4.dp))
+
+                        Row(
+                            modifier = Modifier
+                                .background(Color(0xFF070F1A), RoundedCornerShape(12.dp))
+                                .padding(2.dp)
+                                .fillMaxWidth()
+                        ) {
+                            listOf("Basic", "Precise").forEach { mode ->
+                                val isSel = chordsMode == mode
+                                Box(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .background(
+                                            if (isSel) Color.White else Color.Transparent,
+                                            RoundedCornerShape(10.dp)
+                                        )
+                                        .clickable { chordsMode = mode }
+                                        .padding(vertical = 3.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        text = mode,
+                                        fontSize = 8.5.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (isSel) Color.Black else Color.White
+                                    )
+                                }
                             }
                         }
                     }
                 }
 
-                Spacer(modifier = Modifier.height(16.dp))
-
-                // EADGBE buttons selectable
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
+                // Card 2: Voicings
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFF101C2E)),
+                    border = BorderStroke(1.dp, Color(0xFF1E2E44)),
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier.weight(0.9f)
                 ) {
-                    val strings = listOf("E2", "A2", "D3", "G3", "B3", "E4")
-                    strings.forEach { str ->
-                        val isSel = tunerState.noteName == str
-                        Button(
-                            onClick = { viewModel.engine.selectTunerBaseNote(str) },
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = if (isSel) Color(0xFF00E5FF) else Color(0xFF13233C),
-                                contentColor = if (isSel) Color.Black else Color.White
-                            ),
-                            shape = CircleShape,
-                            contentPadding = PaddingValues(0.dp),
-                            modifier = Modifier.size(42.dp)
+                    Column(
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.Center,
+                            modifier = Modifier.fillMaxWidth()
                         ) {
-                            Text(text = str.removeSuffix("2").removeSuffix("3").removeSuffix("4"), fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                            Text("Voicings", color = Color(0xFF94A3B8), fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                            Spacer(modifier = Modifier.width(3.dp))
+                            Icon(
+                                Icons.Default.Info,
+                                contentDescription = "Info",
+                                tint = Color(0xFF94A3B8),
+                                modifier = Modifier.size(10.dp)
+                            )
                         }
+
+                        Spacer(modifier = Modifier.height(2.dp))
+
+                        Switch(
+                            checked = voicingsEnabled,
+                            onCheckedChange = { voicingsEnabled = it },
+                            colors = SwitchDefaults.colors(
+                                checkedThumbColor = Color.White,
+                                checkedTrackColor = Color(0xFF00E5FF),
+                                uncheckedThumbColor = Color(0xFF94A3B8),
+                                uncheckedTrackColor = Color(0xFF1E293B)
+                            ),
+                            modifier = Modifier.scale(0.7f)
+                        )
                     }
                 }
 
-                Spacer(modifier = Modifier.height(12.dp))
-
-                Button(
-                    onClick = { viewModel.engine.autoTuneTuner() },
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFD4AF37), contentColor = Color.Black),
+                // Card 3: Grid view
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFF101C2E)),
+                    border = BorderStroke(1.dp, Color(0xFF1E2E44)),
                     shape = RoundedCornerShape(8.dp),
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier.weight(1.0f)
                 ) {
-                    Text("Auto-Tune Guitar String (Zero Deviation)", fontWeight = FontWeight.Bold)
+                    Column(
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Text("Grid view", color = Color(0xFF94A3B8), fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                        
+                        Spacer(modifier = Modifier.height(4.dp))
+
+                        IconButton(
+                            onClick = { isGridViewEnabled = !isGridViewEnabled },
+                            modifier = Modifier
+                                .size(28.dp)
+                                .background(
+                                    if (isGridViewEnabled) Color(0xFF00E5FF).copy(alpha = 0.15f) else Color.Transparent,
+                                    CircleShape
+                                )
+                        ) {
+                            Icon(
+                                imageVector = if (isGridViewEnabled) Icons.Default.Grid3x3 else Icons.Default.GridOff,
+                                contentDescription = "Toggle Grid View",
+                                tint = if (isGridViewEnabled) Color(0xFF00E5FF) else Color.White,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // 4. ACTIVE DISPLAY & DUAL PIANO KEYBOARD VIEW
+            if (isGridViewEnabled) {
+                if (!voicingsEnabled) {
+                    // DUAL PIANO KEYBOARDS (Screenshot 2)
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column(
+                                modifier = Modifier.weight(1f),
+                                horizontalAlignment = Alignment.CenterHorizontally
+                            ) {
+                                Text(
+                                    text = "F#",
+                                    fontSize = 18.sp,
+                                    fontWeight = FontWeight.Black,
+                                    color = Color(0xFF00E5FF)
+                                )
+                                Text(
+                                    text = "III",
+                                    fontSize = 11.sp,
+                                    color = Color(0xFF94A3B8)
+                                )
+                            }
+
+                            Column(
+                                modifier = Modifier.weight(1f),
+                                horizontalAlignment = Alignment.CenterHorizontally
+                            ) {
+                                Text(
+                                    text = "B",
+                                    fontSize = 18.sp,
+                                    fontWeight = FontWeight.Black,
+                                    color = Color(0xFF00E5FF)
+                                )
+                                Text(
+                                    text = "VI",
+                                    fontSize = 11.sp,
+                                    color = Color(0xFF94A3B8)
+                                )
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(10.dp))
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Box(modifier = Modifier.weight(1f)) {
+                                MiniChordPianoKeyboard(
+                                    activeNotes = listOf("F#", "A#", "C#"),
+                                    onKeyClick = { viewModel.engine.tapLiveMusicalNote(it) }
+                                )
+                            }
+                            Box(modifier = Modifier.weight(1f)) {
+                                MiniChordPianoKeyboard(
+                                    activeNotes = listOf("B", "D#", "F#"),
+                                    onKeyClick = { viewModel.engine.tapLiveMusicalNote(it) }
+                                )
+                            }
+                        }
+                    }
+                } else {
+                    // SINGLE LARGE KEYBOARD (Screenshot 1 & 3)
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Text(
+                            text = currentChordName,
+                            fontSize = 20.sp,
+                            fontWeight = FontWeight.Black,
+                            color = Color(0xFF00E5FF)
+                        )
+                        Text(
+                            text = chordDegree,
+                            fontSize = 12.sp,
+                            color = Color(0xFF94A3B8)
+                        )
+
+                        Spacer(modifier = Modifier.height(10.dp))
+
+                        ChordAIPianoKeyboard(
+                            activeNotes = currentChordModel?.notes ?: emptyList(),
+                            onKeyClick = { viewModel.engine.tapLiveMusicalNote(it) }
+                        )
+                    }
+                }
+            } else {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text(
+                        text = currentChordName,
+                        fontSize = 20.sp,
+                        fontWeight = FontWeight.Black,
+                        color = Color(0xFF00E5FF)
+                    )
+                    Spacer(modifier = Modifier.height(10.dp))
+                    ChordAIPianoKeyboard(
+                        activeNotes = currentChordModel?.notes ?: emptyList(),
+                        onKeyClick = { viewModel.engine.tapLiveMusicalNote(it) }
+                    )
+                }
+            }
+
+            // 4.5 HARMONIC RECONSTRUCTION ENGINE & ACCURATE NOTE PRESERVATION
+            Spacer(modifier = Modifier.height(16.dp))
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp)
+            ) {
+                HarmonicClassificationToggleCard(viewModel = viewModel)
+
+                ChronologicalNoteStreamView(
+                    notes = performanceNoteStream,
+                    showClassification = showClassification
+                )
+
+                EnhancedGuitarFretboard(
+                    activePerformanceNotes = activePerformanceNotes,
+                    showClassification = showClassification,
+                    onNoteClick = { viewModel.feedPerformanceNotes(listOf(it)) }
+                )
+
+                EnhancedPianoKeyboard(
+                    activePerformanceNotes = activePerformanceNotes,
+                    showClassification = showClassification,
+                    onKeyClick = { viewModel.feedPerformanceNotes(listOf(it)) }
+                )
+            }
+
+            // 5. OTHER RICH MODULES FOR VALUE RETENTION
+            Spacer(modifier = Modifier.height(24.dp))
+            Divider(color = Color(0xFF1E293B).copy(alpha = 0.5f), modifier = Modifier.padding(horizontal = 12.dp))
+            Spacer(modifier = Modifier.height(16.dp))
+
+            Card(
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF0B1424)),
+                border = BorderStroke(1.dp, Color(0xFF1E2E44)),
+                shape = RoundedCornerShape(12.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp)
+            ) {
+                Column(modifier = Modifier.padding(12.dp)) {
+                    Text(
+                        text = "REAL-TIME FFT WAVE SPECTRUM ANALYSIS",
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFF00E5FF),
+                        letterSpacing = 1.sp
+                    )
+                    Spacer(modifier = Modifier.height(10.dp))
+                    val visualAmplitudes = remember(playPositionMs) { viewModel.engine.generateRealtimeFFTAmplitudes(24) }
+                    Box(modifier = Modifier.fillMaxWidth().height(50.dp)) {
+                        Canvas(modifier = Modifier.fillMaxSize()) {
+                            val spacing = size.width / visualAmplitudes.size
+                            for (i in visualAmplitudes.indices) {
+                                val barHeight = visualAmplitudes[i] * size.height * 0.9f
+                                drawRect(
+                                    brush = Brush.verticalGradient(
+                                        colors = listOf(Color(0xFF00E5FF), Color(0xFF1E293B))
+                                    ),
+                                    topLeft = Offset(i * spacing, size.height - barHeight),
+                                    size = Size(spacing * 0.7f, barHeight)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            Card(
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF0B1424)),
+                border = BorderStroke(1.dp, Color(0xFF1E2E44)),
+                shape = RoundedCornerShape(12.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp)
+            ) {
+                val tunerState by viewModel.tunerState.collectAsStateWithLifecycle()
+                Column(modifier = Modifier.padding(12.dp)) {
+                    Text(
+                        text = "CHROMATIC TUNER CENTER",
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFF94A3B8),
+                        letterSpacing = 1.sp
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column {
+                            Text(text = tunerState.noteName, fontSize = 24.sp, fontWeight = FontWeight.Black, color = if (tunerState.isTuned) Color.Green else Color(0xFF00E5FF))
+                            Text(text = "Target: ${tunerState.targetFreq} Hz", fontSize = 9.sp, color = Color(0xFF64748B))
+                        }
+                        Column(horizontalAlignment = Alignment.End) {
+                            Text(text = String.format("%+2.0f Cents", tunerState.deviationCents), fontSize = 11.sp, fontWeight = FontWeight.Bold, color = if (tunerState.isTuned) Color.Green else Color(0xFFFF9100))
+                            Button(
+                                onClick = { viewModel.engine.autoTuneTuner() },
+                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF13233C)),
+                                shape = RoundedCornerShape(4.dp),
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                modifier = Modifier.height(24.dp)
+                            ) {
+                                Text("Auto-Tune", fontSize = 8.sp, color = Color.White)
+                            }
+                        }
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(130.dp))
+        }
+
+        // 6. FLOATING BOTTOM MEDIA PLAYER BAR
+        Box(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .background(Color(0xFF0D1525))
+                .border(BorderStroke(1.dp, Color(0xFF1E3A60).copy(alpha = 0.5f)))
+                .padding(horizontal = 12.dp, vertical = 10.dp)
+        ) {
+            Column(modifier = Modifier.fillMaxWidth()) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Button(
+                        onClick = { transposeSemi = if (transposeSemi == -1) 0 else -1 },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFEF08A)),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 2.dp),
+                        shape = RoundedCornerShape(6.dp),
+                        modifier = Modifier.height(28.dp)
+                    ) {
+                        Text(text = if (transposeSemi == -1) "-1" else "Pitch", color = Color.Black, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                    }
+
+                    Button(
+                        onClick = { speedMultiplier = if (speedMultiplier == 1.0f) 0.8f else 1.0f },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF13233C)),
+                        border = BorderStroke(1.dp, Color(0xFF1E3A60)),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 2.dp),
+                        shape = RoundedCornerShape(6.dp),
+                        modifier = Modifier.height(28.dp)
+                    ) {
+                        Text(text = "Speed (${speedMultiplier}x)", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                    }
+
+                    Button(
+                        onClick = { isLooping = !isLooping },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (isLooping) Color(0xFF00E5FF).copy(alpha = 0.2f) else Color(0xFF13233C)
+                        ),
+                        border = BorderStroke(1.dp, if (isLooping) Color(0xFF00E5FF) else Color(0xFF1E3A60)),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 2.dp),
+                        shape = RoundedCornerShape(6.dp),
+                        modifier = Modifier.height(28.dp)
+                    ) {
+                        Text(text = "Loop", color = if (isLooping) Color(0xFF00E5FF) else Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    val sliderValue = playPositionMs.toFloat()
+                    val seconds = playPositionMs / 1000L
+                    val formattedTime = formatSeconds(seconds.toInt()) + " / 13:36"
+
+                    Slider(
+                        value = sliderValue,
+                        onValueChange = { viewModel.setPlaybackPosition(it.toLong()) },
+                        valueRange = 0f..24000f,
+                        colors = SliderDefaults.colors(
+                            thumbColor = Color(0xFFFEF08A),
+                            activeTrackColor = Color(0xFFFEF08A),
+                            inactiveTrackColor = Color(0xFF475569)
+                        ),
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(18.dp)
+                    )
+
+                    Spacer(modifier = Modifier.width(10.dp))
+
+                    Text(
+                        text = formattedTime,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(6.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.weight(1.3f)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(34.dp)
+                                .background(Color(0xFFFEF08A), RoundedCornerShape(4.dp)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.MusicNote,
+                                contentDescription = "Cover note",
+                                tint = Color.Black,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.width(8.dp))
+
+                        Text(
+                            text = "Yeshua_____LIVE_____Josue_Avila______Calvary_Orlando(256k)",
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White,
+                            maxLines = 1,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.width(8.dp))
+
+                    Row(
+                        modifier = Modifier.weight(0.7f),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp, Alignment.End),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        IconButton(
+                            onClick = {
+                                val prevPos = (playPositionMs - 3000L).coerceAtLeast(0L)
+                                viewModel.setPlaybackPosition(prevPos)
+                            },
+                            modifier = Modifier.size(32.dp)
+                        ) {
+                            Icon(Icons.Default.KeyboardArrowLeft, contentDescription = "Rewind", tint = Color.White, modifier = Modifier.size(24.dp))
+                        }
+
+                        IconButton(
+                            onClick = { viewModel.toggleStemPlayback() },
+                            modifier = Modifier
+                                .size(36.dp)
+                                .background(Color.White, CircleShape)
+                        ) {
+                            Icon(
+                                imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                                contentDescription = "Play/Pause",
+                                tint = Color.Black,
+                                modifier = Modifier.size(22.dp)
+                            )
+                        }
+
+                        IconButton(
+                            onClick = {
+                                val nextPos = (playPositionMs + 3000L).coerceAtMost(24000L)
+                                viewModel.setPlaybackPosition(nextPos)
+                            },
+                            modifier = Modifier.size(32.dp)
+                        ) {
+                            Icon(Icons.Default.KeyboardArrowRight, contentDescription = "Forward", tint = Color.White, modifier = Modifier.size(24.dp))
+                        }
+                    }
                 }
             }
         }
+    }
+}
 
-        Spacer(modifier = Modifier.height(100.dp))
+@Composable
+fun ChordAIPianoKeyboard(
+    activeNotes: List<String>,
+    onKeyClick: (String) -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Color(0xFF0C101B))
+            .border(1.dp, Color(0xFF1D2E49), RoundedCornerShape(12.dp))
+            .padding(8.dp)
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(4.dp)
+                .background(Color(0xFFC62828))
+                .clip(RoundedCornerShape(topStart = 3.dp, topEnd = 3.dp))
+        )
+
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(115.dp)
+                .background(Color(0xFF111827))
+        ) {
+            val whiteKeys = listOf("C", "D", "E", "F", "G", "A", "B", "C2", "D2", "E2", "F2", "G2")
+            Row(modifier = Modifier.fillMaxSize()) {
+                whiteKeys.forEach { note ->
+                    val baseNote = note.removeSuffix("2")
+                    val isHighlighted = activeNotes.contains(baseNote) || activeNotes.contains(note)
+
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxHeight()
+                            .background(
+                                color = if (isHighlighted) Color(0xFFFEF9D9) else Color(0xFFFCFCFC),
+                                shape = RoundedCornerShape(bottomStart = 4.dp, bottomEnd = 4.dp)
+                            )
+                            .border(0.8.dp, Color(0xFF0F1522), RoundedCornerShape(bottomStart = 4.dp, bottomEnd = 4.dp))
+                            .clickable { onKeyClick(note) },
+                        contentAlignment = Alignment.BottomCenter
+                    ) {
+                        Text(
+                            text = if (isHighlighted) baseNote else "",
+                            fontSize = 9.sp,
+                            color = Color.Black,
+                            fontWeight = FontWeight.Black,
+                            modifier = Modifier.padding(bottom = 6.dp)
+                        )
+                    }
+                }
+            }
+
+            val blackKeys = listOf(
+                Pair("C#", 1f),
+                Pair("D#", 2f),
+                Pair("F#", 4f),
+                Pair("G#", 5f),
+                Pair("A#", 6f),
+                Pair("C#2", 8f),
+                Pair("D#2", 9f),
+                Pair("F#2", 11f)
+            )
+
+            BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+                val totalWidth = maxWidth
+                val whiteKeyWidth = totalWidth / whiteKeys.size
+
+                for (pair in blackKeys) {
+                    val note = pair.first
+                    val position = pair.second
+                    val baseNote = note.removeSuffix("2")
+                    val isHighlighted = activeNotes.contains(baseNote) || activeNotes.contains(note)
+                    val leftOffset = whiteKeyWidth * position - (whiteKeyWidth * 0.32f)
+
+                    Box(
+                        modifier = Modifier
+                            .offset(x = leftOffset)
+                            .width(whiteKeyWidth * 0.64f)
+                            .height(72.dp)
+                            .background(
+                                color = if (isHighlighted) Color(0xFFFEF08A) else Color(0xFF1E293B),
+                                shape = RoundedCornerShape(bottomStart = 3.dp, bottomEnd = 3.dp)
+                            )
+                            .border(0.8.dp, Color(0xFF020617), RoundedCornerShape(bottomStart = 3.dp, bottomEnd = 3.dp))
+                            .clickable { onKeyClick(note) },
+                        contentAlignment = Alignment.BottomCenter
+                    ) {
+                        Text(
+                            text = if (isHighlighted) baseNote else "",
+                            fontSize = 8.sp,
+                            color = Color.Black,
+                            fontWeight = FontWeight.Black,
+                            modifier = Modifier.padding(bottom = 4.dp)
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun MiniChordPianoKeyboard(
+    activeNotes: List<String>,
+    onKeyClick: (String) -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Color(0xFF0C101B))
+            .border(1.dp, Color(0xFF1D2E49), RoundedCornerShape(8.dp))
+            .padding(4.dp)
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(65.dp)
+                .background(Color(0xFF111827))
+        ) {
+            val whiteKeys = listOf("C", "D", "E", "F", "G", "A", "B", "C2", "D2", "E2")
+            Row(modifier = Modifier.fillMaxSize()) {
+                whiteKeys.forEach { note ->
+                    val baseNote = note.removeSuffix("2")
+                    val isHighlighted = activeNotes.contains(baseNote) || activeNotes.contains(note)
+
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxHeight()
+                            .background(
+                                color = if (isHighlighted) Color(0xFFFEF9D9) else Color(0xFFFCFCFC),
+                                shape = RoundedCornerShape(bottomStart = 3.dp, bottomEnd = 3.dp)
+                            )
+                            .border(0.5.dp, Color(0xFF0F1522), RoundedCornerShape(bottomStart = 3.dp, bottomEnd = 3.dp))
+                            .clickable { onKeyClick(note) }
+                    )
+                }
+            }
+
+            val blackKeys = listOf(
+                Pair("C#", 1f),
+                Pair("D#", 2f),
+                Pair("F#", 4f),
+                Pair("G#", 5f),
+                Pair("A#", 6f),
+                Pair("C#2", 8f),
+                Pair("D#2", 9f)
+            )
+
+            BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+                val totalWidth = maxWidth
+                val whiteKeyWidth = totalWidth / whiteKeys.size
+
+                for (pair in blackKeys) {
+                    val note = pair.first
+                    val position = pair.second
+                    val baseNote = note.removeSuffix("2")
+                    val isHighlighted = activeNotes.contains(baseNote) || activeNotes.contains(note)
+                    val leftOffset = whiteKeyWidth * position - (whiteKeyWidth * 0.3f)
+
+                    Box(
+                        modifier = Modifier
+                            .offset(x = leftOffset)
+                            .width(whiteKeyWidth * 0.6f)
+                            .height(42.dp)
+                            .background(
+                                color = if (isHighlighted) Color(0xFFFEF08A) else Color(0xFF1E293B),
+                                shape = RoundedCornerShape(bottomStart = 2.dp, bottomEnd = 2.dp)
+                            )
+                            .border(0.5.dp, Color(0xFF020617), RoundedCornerShape(bottomStart = 2.dp, bottomEnd = 2.dp))
+                            .clickable { onKeyClick(note) }
+                    )
+                }
+            }
+        }
     }
 }
 
@@ -2972,7 +4154,10 @@ fun PianoKeyboardRenderer(
 // 8. STUDIO AUDIO SEPARATION & RESTORATION TAB
 // -----------------------------------------------------------------
 @Composable
-fun StudioAudioSeparationTab(viewModel: WorkstationViewModel) {
+fun StudioAudioSeparationTab(
+    viewModel: WorkstationViewModel,
+    onOpenSendToDialog: (sourceName: String) -> Unit = {}
+) {
     val context = LocalContext.current
     val contentResolver = context.contentResolver
 
@@ -3589,130 +4774,18 @@ fun StudioAudioSeparationTab(viewModel: WorkstationViewModel) {
                                 }
                             }
 
-                            Spacer(modifier = Modifier.height(16.dp))
+                            Spacer(modifier = Modifier.height(12.dp))
 
-                            // REMIX PRESETS QUICK DECK
-                            Text(
-                                text = "REMIX STUDIO QUICK DECK",
-                                fontSize = 9.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = Color(0xFF5E718B),
-                                letterSpacing = 1.sp
+                            // PROFESSIONAL 5-STEM MIXER SECTION
+                            ProfessionalStemMixerSection(
+                                viewModel = viewModel,
+                                successState = state,
+                                onOpenSendToDialog = onOpenSendToDialog
                             )
-                            Spacer(modifier = Modifier.height(8.dp))
-
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(6.dp)
-                            ) {
-                                // Acapella button
-                                Button(
-                                    onClick = {
-                                        viewModel.engine.adjustStemVolume("vocals", 1.0f)
-                                        viewModel.engine.adjustStemVolume("melody", 0.0f)
-                                        viewModel.engine.adjustStemVolume("bass", 0.0f)
-                                        viewModel.engine.adjustStemVolume("drums", 0.0f)
-                                        viewModel.setStemPlayback(true)
-                                    },
-                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10B981).copy(alpha = 0.15f)),
-                                    shape = RoundedCornerShape(6.dp),
-                                    modifier = Modifier.weight(1f).height(32.dp).testTag("preset_acapella"),
-                                    contentPadding = PaddingValues(0.dp)
-                                ) {
-                                    Text("🎤 Acapella", fontSize = 9.sp, fontWeight = FontWeight.Black, color = Color(0xFF10B981))
-                                }
-
-                                // Dub drum & bass
-                                Button(
-                                    onClick = {
-                                        viewModel.engine.adjustStemVolume("vocals", 0.0f)
-                                        viewModel.engine.adjustStemVolume("melody", 0.0f)
-                                        viewModel.engine.adjustStemVolume("bass", 1.0f)
-                                        viewModel.engine.adjustStemVolume("drums", 1.0f)
-                                        viewModel.setStemPlayback(true)
-                                    },
-                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFE040FB).copy(alpha = 0.15f)),
-                                    shape = RoundedCornerShape(6.dp),
-                                    modifier = Modifier.weight(1f).height(32.dp).testTag("preset_durmbass"),
-                                    contentPadding = PaddingValues(0.dp)
-                                ) {
-                                    Text("🥁 Dub D&B", fontSize = 9.sp, fontWeight = FontWeight.Black, color = Color(0xFFE040FB))
-                                }
-
-                                // Karaoke
-                                Button(
-                                    onClick = {
-                                        viewModel.engine.adjustStemVolume("vocals", 0.0f)
-                                        viewModel.engine.adjustStemVolume("melody", 1.0f)
-                                        viewModel.engine.adjustStemVolume("bass", 0.8f)
-                                        viewModel.engine.adjustStemVolume("drums", 0.8f)
-                                        viewModel.setStemPlayback(true)
-                                    },
-                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFD4AF37).copy(alpha = 0.15f)),
-                                    shape = RoundedCornerShape(6.dp),
-                                    modifier = Modifier.weight(1f).height(32.dp).testTag("preset_karaoke"),
-                                    contentPadding = PaddingValues(0.dp)
-                                ) {
-                                    Text("🎸 Karaoke", fontSize = 9.sp, fontWeight = FontWeight.Black, color = Color(0xFFD4AF37))
-                                }
-
-                                // Reset Custom
-                                Button(
-                                    onClick = {
-                                        viewModel.engine.adjustStemVolume("vocals", 1.0f)
-                                        viewModel.engine.adjustStemVolume("melody", 1.0f)
-                                        viewModel.engine.adjustStemVolume("bass", 0.8f)
-                                        viewModel.engine.adjustStemVolume("drums", 0.8f)
-                                        viewModel.toggleStemPlayback()
-                                    },
-                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF00E5FF).copy(alpha = 0.15f)),
-                                    shape = RoundedCornerShape(6.dp),
-                                    modifier = Modifier.weight(1f).height(32.dp).testTag("preset_reset"),
-                                    contentPadding = PaddingValues(0.dp)
-                                ) {
-                                    Text("🔄 ResetMix", fontSize = 9.sp, fontWeight = FontWeight.Black, color = Color(0xFF00E5FF))
-                                }
-                            }
 
                             Spacer(modifier = Modifier.height(16.dp))
 
-                            // Interactive Faders
-                            MixerFaderRow(
-                                label = "🎤 VOCALS STEM",
-                                volume = state.vocalsVolume,
-                                onVolumeChange = { viewModel.engine.adjustStemVolume("vocals", it) },
-                                onMuteToggle = {
-                                    val newVol = if (state.vocalsVolume > 0.01f) 0.0f else 0.8f
-                                    viewModel.engine.adjustStemVolume("vocals", newVol)
-                                }
-                            )
-                            MixerFaderRow(
-                                label = "🎸 MELODY / LEAD SYNTH",
-                                volume = state.melodyVolume,
-                                onVolumeChange = { viewModel.engine.adjustStemVolume("melody", it) },
-                                onMuteToggle = {
-                                    val newVol = if (state.melodyVolume > 0.01f) 0.0f else 0.8f
-                                    viewModel.engine.adjustStemVolume("melody", newVol)
-                                }
-                            )
-                            MixerFaderRow(
-                                label = "🎸 BASS LINE",
-                                volume = state.bassVolume,
-                                onVolumeChange = { viewModel.engine.adjustStemVolume("bass", it) },
-                                onMuteToggle = {
-                                    val newVol = if (state.bassVolume > 0.01f) 0.0f else 0.8f
-                                    viewModel.engine.adjustStemVolume("bass", newVol)
-                                }
-                            )
-                            MixerFaderRow(
-                                label = "🥁 DRUMS & PERCUSSION",
-                                volume = state.drumsVolume,
-                                onVolumeChange = { viewModel.engine.adjustStemVolume("drums", it) },
-                                onMuteToggle = {
-                                    val newVol = if (state.drumsVolume > 0.01f) 0.0f else 0.8f
-                                    viewModel.engine.adjustStemVolume("drums", newVol)
-                                }
-                            )
+                            TrackChordTimelineModule(viewModel = viewModel)
 
                             Spacer(modifier = Modifier.height(16.dp))
 
@@ -3945,7 +5018,10 @@ fun RestorationSwitchRow(
 // 9. LIBRARY & SEARCH DATABASE TAB
 // -----------------------------------------------------------------
 @Composable
-fun LibrarySessionTab(viewModel: WorkstationViewModel) {
+fun LibrarySessionTab(
+    viewModel: WorkstationViewModel,
+    onOpenSendToDialog: (sourceName: String) -> Unit = {}
+) {
     val sessions by viewModel.allSessions.collectAsStateWithLifecycle()
     val licks by viewModel.allLicks.collectAsStateWithLifecycle()
 
@@ -4032,7 +5108,8 @@ fun LibrarySessionTab(viewModel: WorkstationViewModel) {
                             session = session,
                             onDelete = { viewModel.deleteSession(session) },
                             onExport = { viewModel.triggerExport("json", session) },
-                            onExportMidi = { viewModel.triggerExport("midi", session) }
+                            onExportMidi = { viewModel.triggerExport("midi", session) },
+                            onOpenSendToDialog = onOpenSendToDialog
                         )
                     }
                 }
@@ -4114,7 +5191,14 @@ fun LibrarySessionTab(viewModel: WorkstationViewModel) {
                                         color = Color(0xFFB0BEC5)
                                     )
 
-                                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                                        UniversalSendToButton(
+                                            sourceName = lick.title,
+                                            buttonText = "SEND TO",
+                                            accentColor = Color(0xFFD4AF37),
+                                            onOpenSendToDialog = onOpenSendToDialog
+                                        )
+
                                         TextButton(
                                             onClick = { viewModel.triggerExportLick(lick) },
                                             contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp),
@@ -4152,6 +5236,8 @@ fun SettingsTab(viewModel: WorkstationViewModel) {
     val quizOpt by viewModel.quizOptions.collectAsStateWithLifecycle()
     val quizFeed by viewModel.quizFeedback.collectAsStateWithLifecycle()
     val exportLog by viewModel.exportLog.collectAsStateWithLifecycle()
+    val userPrefs by viewModel.userPreferences.collectAsStateWithLifecycle()
+    val scope = rememberCoroutineScope()
 
     var customNotesName by remember { mutableStateOf("") }
     var selectedExportFormat by remember { mutableStateOf("pdf") }
@@ -4164,6 +5250,140 @@ fun SettingsTab(viewModel: WorkstationViewModel) {
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
+        // JETPACK DATASTORE USER PREFERENCES & STATE FLAGS
+        Card(
+            colors = CardDefaults.cardColors(containerColor = Color(0xFF0A192F)),
+            border = BorderStroke(1.dp, Color(0xFF10B981).copy(alpha = 0.6f)),
+            shape = RoundedCornerShape(16.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag("datastore_user_preferences_card")
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.Storage, contentDescription = null, tint = Color(0xFF10B981))
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "JETPACK DATASTORE USER PREFERENCES",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Black,
+                        color = Color(0xFF10B981),
+                        letterSpacing = 1.5.sp
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                Text(
+                    text = "Asynchronous DataStore persistence engine managing user preferences, active module state flags, and the session recovery trigger.",
+                    fontSize = 11.sp,
+                    color = Color(0xFFCBD5E1),
+                    lineHeight = 15.sp
+                )
+
+                Spacer(modifier = Modifier.height(14.dp))
+
+                // Preferences summary grid
+                Column(
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(Color(0xFF040C1A), RoundedCornerShape(10.dp))
+                        .padding(12.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("Global Key Signature:", fontSize = 11.sp, color = Color(0xFF94A3B8))
+                        Text(userPrefs.globalKeySignature, fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color(0xFF00E5FF))
+                    }
+                    HorizontalDivider(color = Color(0xFF1E293B))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("Engine BPM:", fontSize = 11.sp, color = Color(0xFF94A3B8))
+                        Text("${userPrefs.bpm} BPM", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                    }
+                    HorizontalDivider(color = Color(0xFF1E293B))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("Active Module ID:", fontSize = 11.sp, color = Color(0xFF94A3B8))
+                        Text(userPrefs.activeModuleId, fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color(0xFFA855F7))
+                    }
+                    HorizontalDivider(color = Color(0xFF1E293B))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("Detection Mode:", fontSize = 11.sp, color = Color(0xFF94A3B8))
+                        Text(userPrefs.detectionMode, fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color(0xFF38BDF8))
+                    }
+                    HorizontalDivider(color = Color(0xFF1E293B))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("Resume Dialog Trigger Flag:", fontSize = 11.sp, color = Color(0xFF94A3B8))
+                        Text(
+                            if (userPrefs.shouldShowResumeDialog && userPrefs.hasUnsavedSession) "ACTIVE (Will Prompt)" else "CLEARED / INACTIVE",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = if (userPrefs.shouldShowResumeDialog && userPrefs.hasUnsavedSession) Color(0xFF10B981) else Color(0xFF64748B)
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(14.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = {
+                            scope.launch {
+                                viewModel.userPreferencesRepository.setUnsavedSessionData(
+                                    title = "Unfinished DataStore Test Session",
+                                    bpm = 132,
+                                    key = "F# Minor",
+                                    chords = "F#m, C#m, D, E",
+                                    hasUnsaved = true,
+                                    showDialog = true
+                                )
+                                viewModel.saveCurrentModuleStateImmediately()
+                            }
+                        },
+                        border = BorderStroke(1.dp, Color(0xFF10B981)),
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("trigger_resume_dialog_btn")
+                    ) {
+                        Text("FLAG RESUME DIALOG", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color(0xFF10B981))
+                    }
+
+                    Button(
+                        onClick = {
+                            scope.launch {
+                                viewModel.userPreferencesRepository.clearResumeDialogTrigger()
+                            }
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1E293B)),
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("clear_resume_dialog_btn")
+                    ) {
+                        Text("CLEAR TRIGGER", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                    }
+                }
+            }
+        }
+
         // AI MUSIC THEORY ESSENTIALS
         Card(
             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
@@ -4250,64 +5470,7 @@ fun SettingsTab(viewModel: WorkstationViewModel) {
         }
 
         // FULL REPORT EXPORT CENTER
-        Card(
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
-            shape = RoundedCornerShape(12.dp),
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Column(modifier = Modifier.padding(16.dp)) {
-                Text(
-                    text = "HZ WORKSTATION EXPORT HUB",
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.Black,
-                    color = Color.White,
-                    letterSpacing = 2.sp
-                )
-                
-                Spacer(modifier = Modifier.height(8.dp))
-
-                Text(
-                    text = "Generate comprehensive PDFs, structured CSVs, JSON data, or MIDI sheets of your sessions.",
-                    fontSize = 11.sp,
-                    color = Color(0xFFB0BEC5)
-                )
-
-                Spacer(modifier = Modifier.height(16.dp))
-
-                // Select export format
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    val formats = listOf("pdf", "midi", "json", "csv")
-                    formats.forEach { form ->
-                        val isPicked = selectedExportFormat == form
-                        Button(
-                            onClick = { selectedExportFormat = form },
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = if (isPicked) Color(0xFFD4AF37) else Color(0xFF132F52),
-                                contentColor = if (isPicked) Color.Black else Color.White
-                            ),
-                            shape = RoundedCornerShape(4.dp),
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Text(text = form.uppercase(), fontSize = 10.sp, fontWeight = FontWeight.Bold)
-                        }
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(16.dp))
-
-                Button(
-                    onClick = { viewModel.triggerExport(selectedExportFormat, null) },
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF00E5FF), contentColor = Color.Black),
-                    shape = RoundedCornerShape(8.dp),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text("Assemble & Generate Global Export Report", fontWeight = FontWeight.Bold)
-                }
-            }
-        }
+        ExportCenterScreen(viewModel = viewModel)
 
         // Credit notice
         Card(
@@ -4654,64 +5817,644 @@ fun ImportAudioDialog(
     viewModel: WorkstationViewModel,
     onDismiss: () -> Unit
 ) {
+    val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
-    var isLoading by remember { mutableStateOf(false) }
-    var loadedFileName by remember { mutableStateOf("audio_track_01.mp3") }
 
-    Dialog(onDismissRequest = onDismiss) {
+    var selectedSource by remember { mutableStateOf("All Storage Sources") }
+    var isLoading by remember { mutableStateOf(false) }
+    var previewPlaying by remember { mutableStateOf(false) }
+
+    var currentMetadata by remember {
+        mutableStateOf(
+            UniversalAudioMetadataExtractor.createPresetMetadata(
+                fileName = "sungura_master_lead_135bpm.flac",
+                artist = "Franco & OK Jazz",
+                album = "Kinshasa Sessions Vol 2",
+                durationFormatted = "04:18",
+                bitrateKbps = "1412 kbps",
+                sampleRateHz = "96.0 kHz",
+                channels = "Stereo (2 ch)",
+                fileSize = "28.4 MB",
+                formatExtension = "FLAC",
+                sourceType = "SD Card",
+                bpm = 135,
+                key = "A Major"
+            )
+        )
+    }
+
+    val filePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            isLoading = true
+            coroutineScope.launch {
+                delay(300)
+                val meta = UniversalAudioMetadataExtractor.extractMetadataFromUri(
+                    context = context,
+                    uri = uri,
+                    sourceType = if (selectedSource == "All Storage Sources") "File Manager" else selectedSource
+                )
+                currentMetadata = meta
+                isLoading = false
+            }
+        }
+    }
+
+    val storagePresets = remember {
+        listOf(
+            UniversalAudioMetadataExtractor.createPresetMetadata(
+                fileName = "sungura_master_lead.flac",
+                artist = "Franco & OK Jazz",
+                album = "Kinshasa Sessions",
+                durationFormatted = "04:18",
+                bitrateKbps = "1412 kbps",
+                sampleRateHz = "96.0 kHz",
+                channels = "Stereo (2 ch)",
+                fileSize = "28.4 MB",
+                formatExtension = "FLAC",
+                sourceType = "SD Card",
+                bpm = 135,
+                key = "A Major"
+            ),
+            UniversalAudioMetadataExtractor.createPresetMetadata(
+                fileName = "seben_guitar_rhythm.wav",
+                artist = "Zaiko Langa Langa",
+                album = "Rumba Wave",
+                durationFormatted = "03:45",
+                bitrateKbps = "1536 kbps",
+                sampleRateHz = "48.0 kHz",
+                channels = "Stereo (2 ch)",
+                fileSize = "41.2 MB",
+                formatExtension = "WAV",
+                sourceType = "Downloads",
+                bpm = 138,
+                key = "F# Major"
+            ),
+            UniversalAudioMetadataExtractor.createPresetMetadata(
+                fileName = "rhumba_brass_section.mp3",
+                artist = "Tabu Ley Rochereau",
+                album = "African Soukous Classics",
+                durationFormatted = "05:12",
+                bitrateKbps = "320 kbps",
+                sampleRateHz = "44.1 kHz",
+                channels = "Stereo (2 ch)",
+                fileSize = "11.8 MB",
+                formatExtension = "MP3",
+                sourceType = "Internal Storage",
+                bpm = 124,
+                key = "G Major"
+            ),
+            UniversalAudioMetadataExtractor.createPresetMetadata(
+                fileName = "highlife_acoustic_solo.m4a",
+                artist = "Ebo Taylor & Band",
+                album = "Saltpond Highlife",
+                durationFormatted = "03:10",
+                bitrateKbps = "256 kbps",
+                sampleRateHz = "44.1 kHz",
+                channels = "Stereo (2 ch)",
+                fileSize = "6.1 MB",
+                formatExtension = "M4A",
+                sourceType = "Music Folder",
+                bpm = 118,
+                key = "D Major"
+            ),
+            UniversalAudioMetadataExtractor.createPresetMetadata(
+                fileName = "afrobeat_poly_percussion.ogg",
+                artist = "Fela Anikulapo Kuti",
+                album = "Shrine Masters",
+                durationFormatted = "06:30",
+                bitrateKbps = "320 kbps",
+                sampleRateHz = "48.0 kHz",
+                channels = "Stereo (2 ch)",
+                fileSize = "15.2 MB",
+                formatExtension = "OGG",
+                sourceType = "External USB Storage",
+                bpm = 122,
+                key = "E Minor"
+            ),
+            UniversalAudioMetadataExtractor.createPresetMetadata(
+                fileName = "gospel_praise_chords.aac",
+                artist = "Soweto Gospel Group",
+                album = "Divine Harmonies",
+                durationFormatted = "04:02",
+                bitrateKbps = "256 kbps",
+                sampleRateHz = "44.1 kHz",
+                channels = "Stereo (2 ch)",
+                fileSize = "7.8 MB",
+                formatExtension = "AAC",
+                sourceType = "Recent Files",
+                bpm = 112,
+                key = "C Major"
+            ),
+            UniversalAudioMetadataExtractor.createPresetMetadata(
+                fileName = "jazz_fusion_improvisation.aiff",
+                artist = "Hugh Masekela",
+                album = "Graret Town Sessions",
+                durationFormatted = "05:45",
+                bitrateKbps = "1412 kbps",
+                sampleRateHz = "44.1 kHz",
+                channels = "Stereo (2 ch)",
+                fileSize = "58.1 MB",
+                formatExtension = "AIFF",
+                sourceType = "File Manager",
+                bpm = 104,
+                key = "B Minor"
+            ),
+            UniversalAudioMetadataExtractor.createPresetMetadata(
+                fileName = "studio_archival_tape.wma",
+                artist = "Master Audio Lab",
+                album = "HZ Acoustic Archive",
+                durationFormatted = "02:50",
+                bitrateKbps = "192 kbps",
+                sampleRateHz = "44.1 kHz",
+                channels = "Stereo (2 ch)",
+                fileSize = "4.2 MB",
+                formatExtension = "WMA",
+                sourceType = "Internal Storage",
+                bpm = 120,
+                key = "A Minor"
+            )
+        )
+    }
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
         Card(
-            colors = CardDefaults.cardColors(containerColor = Color(0xFF0C1424)),
-            border = BorderStroke(1.dp, Color(0xFFD4AF37)),
-            shape = RoundedCornerShape(16.dp),
+            colors = CardDefaults.cardColors(containerColor = Color(0xFF091220)),
+            border = BorderStroke(1.dp, Color(0xFF00E5FF).copy(alpha = 0.6f)),
+            shape = RoundedCornerShape(20.dp),
             modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp)
+                .fillMaxWidth(0.95f)
+                .fillMaxHeight(0.92f)
+                .padding(8.dp)
+                .testTag("universal_audio_import_dialog_card")
         ) {
-            Column(modifier = Modifier.padding(16.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text(
-                    text = "IMPORT LOCAL AUDIO TRACK",
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = Color(0xFFD4AF37)
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(16.dp)
+            ) {
+                // Top Title & Close Row
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Icon(
+                            imageVector = Icons.Default.CloudUpload,
+                            contentDescription = "Universal Audio Import System",
+                            tint = Color(0xFF00E5FF),
+                            modifier = Modifier.size(24.dp)
+                        )
+                        Column {
+                            Text(
+                                text = "UNIVERSAL AUDIO IMPORT SYSTEM™",
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFF00E5FF),
+                                letterSpacing = 0.5.sp
+                            )
+                            Text(
+                                text = "Extract metadata, create project & deploy to all analysis modules offline",
+                                fontSize = 10.sp,
+                                color = Color(0xFF8C9BAE)
+                            )
+                        }
+                    }
+
+                    IconButton(
+                        onClick = onDismiss,
+                        modifier = Modifier.size(32.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Close,
+                            contentDescription = "Close",
+                            tint = Color.White
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // Storage Source Filter Chips Row
+                val sourceTypes = listOf(
+                    "All Storage Sources",
+                    "Internal Storage",
+                    "SD Card",
+                    "Downloads",
+                    "Music Folder",
+                    "Recent Files",
+                    "External USB Storage",
+                    "File Manager"
                 )
 
-                Spacer(modifier = Modifier.height(8.dp))
+                LazyRow(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    items(sourceTypes) { src ->
+                        val isSel = selectedSource == src
+                        Surface(
+                            shape = RoundedCornerShape(20.dp),
+                            color = if (isSel) Color(0xFF00E5FF) else Color(0xFF132338),
+                            border = BorderStroke(0.5.dp, if (isSel) Color(0xFF00E5FF) else Color(0xFF233B58)),
+                            modifier = Modifier.clickable {
+                                selectedSource = src
+                            }
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Icon(
+                                    imageVector = when (src) {
+                                        "SD Card" -> Icons.Default.SdCard
+                                        "Downloads" -> Icons.Default.Download
+                                        "Music Folder" -> Icons.Default.LibraryMusic
+                                        "External USB Storage" -> Icons.Default.Usb
+                                        "Recent Files" -> Icons.Default.History
+                                        else -> Icons.Default.Folder
+                                    },
+                                    contentDescription = src,
+                                    tint = if (isSel) Color.Black else Color(0xFF00E5FF),
+                                    modifier = Modifier.size(12.dp)
+                                )
+                                Text(
+                                    text = src,
+                                    fontSize = 10.sp,
+                                    fontWeight = if (isSel) FontWeight.Bold else FontWeight.Normal,
+                                    color = if (isSel) Color.Black else Color.White
+                                )
+                            }
+                        }
+                    }
+                }
 
-                if (isLoading) {
-                    CircularProgressIndicator(color = Color(0xFFD4AF37))
-                    Text("Analyzing harmonics in background thread...", fontSize = 11.sp, color = Color.White)
-                } else {
-                    Text("Select a simulated system resource file to index into the Room analysis engine database:", fontSize = 11.sp, color = Color(0xFFB0BEC5), textAlign = TextAlign.Center)
-                    
-                    val dummyTracks = listOf("rhumba_seben_guit_135.wav", "sungura_lead_Amajor.mp3", "jazz_intervals_quiz.flac")
-                    dummyTracks.forEach { file ->
-                        Button(
-                            onClick = {
-                                loadedFileName = file
-                                isLoading = true
-                                coroutineScope.launch {
-                                    delay(1200) // simulation file read
-                                    isLoading = false
-                                    viewModel.addSession(
-                                        title = "Import: $loadedFileName",
-                                        bpm = if (loadedFileName.contains("seben")) 135 else 120,
-                                        key = if (loadedFileName.contains("Amajor")) "A Major" else "G Major",
-                                        notes = "Imported external audio file resource.",
-                                        chords = "C, G, D, Em",
-                                        tags = "Imports, Decoded"
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // Drag & Drop / System Picker Zone
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFF08192E)),
+                    border = BorderStroke(1.dp, Color(0xFF00E5FF).copy(alpha = 0.4f)),
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { filePickerLauncher.launch("audio/*") }
+                        .testTag("drag_drop_zone")
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(12.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.FileOpen,
+                                contentDescription = "Open Storage",
+                                tint = Color(0xFFD4AF37),
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Text(
+                                text = "BROWSE DEVICE STORAGE & FILE MANAGER",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFFD4AF37)
+                            )
+                        }
+
+                        Text(
+                            text = "Drag & drop audio file here or tap to select from Internal Storage, SD Card, Downloads, Music, or USB",
+                            fontSize = 10.sp,
+                            color = Color(0xFFB0BEC5),
+                            textAlign = TextAlign.Center
+                        )
+
+                        // Supported Formats Row
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(4.dp, Alignment.CenterHorizontally),
+                            modifier = Modifier.padding(top = 4.dp)
+                        ) {
+                            listOf("MP3", "WAV", "FLAC", "AAC", "OGG", "M4A", "AIFF", "WMA").forEach { fmt ->
+                                Surface(
+                                    shape = RoundedCornerShape(4.dp),
+                                    color = Color(0xFF102848),
+                                    border = BorderStroke(0.5.dp, Color(0xFF00E5FF).copy(alpha = 0.3f))
+                                ) {
+                                    Text(
+                                        text = fmt,
+                                        fontSize = 8.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color(0xFF00E5FF),
+                                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
                                     )
-                                    onDismiss()
                                 }
-                            },
-                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF132F52)),
+                            }
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // Scrollable Content area (Selected File Details + Waveform + Preset List)
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    if (isLoading) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(120.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                CircularProgressIndicator(color = Color(0xFF00E5FF), modifier = Modifier.size(28.dp))
+                                Text("Reading file header & extracting metadata offline...", fontSize = 11.sp, color = Color.White)
+                            }
+                        }
+                    } else {
+                        // SELECTED FILE METADATA & WAVEFORM PREVIEW CARD
+                        val meta = currentMetadata
+                        Card(
+                            colors = CardDefaults.cardColors(containerColor = Color(0xFF0F233C)),
+                            border = BorderStroke(1.dp, Color(0xFF00E5FF)),
+                            shape = RoundedCornerShape(14.dp),
                             modifier = Modifier.fillMaxWidth()
                         ) {
-                            Text(file, fontSize = 11.sp)
+                            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                // Header Badge Row
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Surface(
+                                        shape = RoundedCornerShape(6.dp),
+                                        color = Color(0xFF00E5FF),
+                                    ) {
+                                        Text(
+                                            text = "${meta.formatExtension} • ${meta.sourceType}",
+                                            fontSize = 9.sp,
+                                            fontWeight = FontWeight.Black,
+                                            color = Color.Black,
+                                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp)
+                                        )
+                                    }
+
+                                    Text(
+                                        text = "SELECTED TRACK DETAILS",
+                                        fontSize = 9.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color(0xFF8C9BAE)
+                                    )
+                                }
+
+                                // File Name, Artist & Album
+                                Column {
+                                    Text(
+                                        text = meta.fileName,
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color.White,
+                                        maxLines = 1
+                                    )
+                                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        Text(
+                                            text = "Artist: ${meta.artist}",
+                                            fontSize = 10.sp,
+                                            color = Color(0xFFD4AF37)
+                                        )
+                                        Text(
+                                            text = "• Album: ${meta.album}",
+                                            fontSize = 10.sp,
+                                            color = Color(0xFFB0BEC5)
+                                        )
+                                    }
+                                }
+
+                                HorizontalDivider(color = Color(0xFF1E3A60), thickness = 0.5.dp)
+
+                                // 8 Metadata Fields Display Grid
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    ImportMetadataItem("Duration", meta.durationFormatted, Icons.Default.Schedule)
+                                    ImportMetadataItem("Bitrate", meta.bitrateKbps, Icons.Default.Speed)
+                                    ImportMetadataItem("Sample Rate", meta.sampleRateHz, Icons.Default.GraphicEq)
+                                    ImportMetadataItem("Channels", meta.channels, Icons.Default.SurroundSound)
+                                    ImportMetadataItem("File Size", meta.fileSize, Icons.Default.Storage)
+                                }
+
+                                Spacer(modifier = Modifier.height(4.dp))
+
+                                // Waveform Preview Canvas
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = "OFFLINE WAVEFORM PREVIEW",
+                                        fontSize = 9.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color(0xFF00E5FF)
+                                    )
+
+                                    IconButton(
+                                        onClick = { previewPlaying = !previewPlaying },
+                                        modifier = Modifier.size(24.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = if (previewPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                                            contentDescription = "Preview Audio",
+                                            tint = Color(0xFF00E5FF)
+                                        )
+                                    }
+                                }
+
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(48.dp)
+                                        .background(Color(0xFF081424), RoundedCornerShape(8.dp))
+                                        .padding(horizontal = 8.dp, vertical = 6.dp)
+                                ) {
+                                    val amps = meta.waveformAmplitudes
+                                    Canvas(modifier = Modifier.fillMaxSize()) {
+                                        if (amps.isNotEmpty()) {
+                                            val barWidth = size.width / amps.size
+                                            amps.forEachIndexed { index, amp ->
+                                                val barHeight = size.height * amp
+                                                val x = index * barWidth
+                                                val y = (size.height - barHeight) / 2f
+                                                val color = if (index < (amps.size * if (previewPlaying) 0.6f else 0.35f)) Color(0xFF00E5FF) else Color(0xFF2A4B75)
+                                                drawRect(
+                                                    color = color,
+                                                    topLeft = Offset(x, y),
+                                                    size = Size(barWidth * 0.7f, barHeight)
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
+
+                        // Presets List by Filter
+                        Text(
+                            text = "DEVICE STORAGE & OFFLINE PRESETS (${selectedSource.uppercase()})",
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFF8C9BAE)
+                        )
+
+                        val filteredPresets = if (selectedSource == "All Storage Sources") {
+                            storagePresets
+                        } else {
+                            storagePresets.filter { it.sourceType.equals(selectedSource, ignoreCase = true) }.ifEmpty { storagePresets }
+                        }
+
+                        filteredPresets.forEach { item ->
+                            val isSelected = item.fileName == meta.fileName
+                            Card(
+                                colors = CardDefaults.cardColors(
+                                    containerColor = if (isSelected) Color(0xFF102D4E) else Color(0xFF0D1C30)
+                                ),
+                                border = BorderStroke(
+                                    0.5.dp,
+                                    if (isSelected) Color(0xFF00E5FF) else Color(0xFF1D3B60)
+                                ),
+                                shape = RoundedCornerShape(10.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        currentMetadata = item
+                                    }
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(10.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                        modifier = Modifier.weight(1f)
+                                    ) {
+                                        Surface(
+                                            shape = RoundedCornerShape(6.dp),
+                                            color = when (item.formatExtension) {
+                                                "FLAC", "WAV", "AIFF" -> Color(0xFF00E5FF)
+                                                "MP3", "AAC", "M4A" -> Color(0xFFD4AF37)
+                                                else -> Color(0xFF9C27B0)
+                                            }
+                                        ) {
+                                            Text(
+                                                text = item.formatExtension,
+                                                fontSize = 9.sp,
+                                                fontWeight = FontWeight.Black,
+                                                color = Color.Black,
+                                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                            )
+                                        }
+
+                                        Column {
+                                            Text(
+                                                text = item.fileName,
+                                                fontSize = 11.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = Color.White,
+                                                maxLines = 1
+                                            )
+                                            Text(
+                                                text = "${item.artist} • ${item.sourceType} • ${item.durationFormatted} • ${item.fileSize}",
+                                                fontSize = 9.sp,
+                                                color = Color(0xFF8C9BAE)
+                                            )
+                                        }
+                                    }
+
+                                    if (isSelected) {
+                                        Icon(
+                                            imageVector = Icons.Default.CheckCircle,
+                                            contentDescription = "Selected",
+                                            tint = Color(0xFF00E5FF),
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // Bottom Primary Import & Create Project Button
+                Button(
+                    onClick = {
+                        isLoading = true
+                        coroutineScope.launch {
+                            delay(600)
+                            viewModel.importUniversalAudio(currentMetadata)
+                            isLoading = false
+                            onDismiss()
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF00E5FF)),
+                    shape = RoundedCornerShape(12.dp),
+                    enabled = !isLoading,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(46.dp)
+                        .testTag("confirm_import_and_create_project_button")
+                ) {
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.RocketLaunch,
+                            contentDescription = "Create Project",
+                            tint = Color.Black,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Text(
+                            text = "IMPORT & AUTOMATICALLY CREATE PROJECT",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Black,
+                            color = Color.Black
+                        )
                     }
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun ImportMetadataItem(label: String, value: String, icon: ImageVector) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+            Icon(imageVector = icon, contentDescription = label, tint = Color(0xFF00E5FF), modifier = Modifier.size(10.dp))
+            Text(text = label, fontSize = 8.sp, color = Color(0xFF8C9BAE))
+        }
+        Text(text = value, fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color.White)
     }
 }
 
@@ -4722,4 +6465,1023 @@ fun formatSeconds(totalSecs: Int): String {
     val mins = totalSecs / 60
     val secs = totalSecs % 60
     return String.format("%02d:%02d", mins, secs)
+}
+
+@Composable
+fun TrackChordTimelineModule(viewModel: WorkstationViewModel) {
+    val timeline by viewModel.trackChordTimeline.collectAsStateWithLifecycle()
+    val playPositionMs by viewModel.playbackPositionMs.collectAsStateWithLifecycle()
+    val isPlaying by viewModel.isStemPlaybackActive.collectAsStateWithLifecycle()
+    val globalKeySignature by viewModel.globalKeySignature.collectAsStateWithLifecycle()
+
+    if (timeline.isEmpty()) return
+
+    val listState = rememberLazyListState()
+    var autoScrollEnabled by remember { mutableStateOf(true) }
+
+    // Find active chord index
+    val activeIndex = (playPositionMs / 3000L).toInt().coerceIn(0, timeline.size - 1)
+
+    // Smoothly scroll to the active item in real-time
+    LaunchedEffect(activeIndex, autoScrollEnabled) {
+        if (autoScrollEnabled && timeline.isNotEmpty()) {
+            listState.animateScrollToItem(activeIndex)
+        }
+    }
+
+    Card(
+        colors = CardDefaults.cardColors(containerColor = Color(0xFF071124)),
+        border = BorderStroke(1.dp, Color(0xFF1E3A60)),
+        shape = RoundedCornerShape(16.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("track_chord_timeline_module_card")
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            // Header with status details
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column {
+                    Text(
+                        text = "REAL-TIME CHORD RECOGNITION TIMELINE",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Black,
+                        color = Color(0xFF00E5FF),
+                        letterSpacing = 1.2.sp
+                    )
+                    Text(
+                        text = "Synchronized analysis of current audio track",
+                        fontSize = 9.sp,
+                        color = Color(0xFF64748B)
+                    )
+                }
+
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    IconButton(
+                        onClick = { autoScrollEnabled = !autoScrollEnabled },
+                        modifier = Modifier.size(24.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Sync,
+                            contentDescription = "Toggle Auto-Scroll",
+                            tint = if (autoScrollEnabled) Color(0xFF00E5FF) else Color(0xFF64748B),
+                            modifier = Modifier.size(14.dp)
+                        )
+                    }
+                    Text(
+                        text = if (autoScrollEnabled) "Autofollow" else "Manual",
+                        fontSize = 8.sp,
+                        color = if (autoScrollEnabled) Color(0xFF00E5FF) else Color(0xFF64748B),
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // Key info banner
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(Color(0xFF030712), RoundedCornerShape(8.dp))
+                    .border(1.dp, Color(0xFF132F52), RoundedCornerShape(8.dp))
+                    .padding(10.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Default.MusicNote,
+                        contentDescription = "Key Signature",
+                        tint = Color(0xFFE040FB),
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "Detected Key Signature:",
+                        fontSize = 10.sp,
+                        color = Color(0xFF94A3B8)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(
+                        text = globalKeySignature ?: "Analyzing...",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Black,
+                        color = Color(0xFFE040FB)
+                    )
+                }
+
+                val activeChord = timeline.getOrNull(activeIndex)
+                if (activeChord != null) {
+                    val confPercent = (activeChord.confidence * 100).toInt()
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(
+                            modifier = Modifier
+                                .size(6.dp)
+                                .background(Color(0xFF10B981), CircleShape)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = "Confidence: $confPercent%",
+                            fontSize = 9.sp,
+                            color = Color(0xFF10B981),
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // Scrollable Timeline list of chord entries
+            LazyRow(
+                state = listState,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("scrollable_chord_timeline_lazyrow"),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                contentPadding = PaddingValues(vertical = 4.dp, horizontal = 2.dp)
+            ) {
+                itemsIndexed(timeline) { index, entry ->
+                    val isActive = index == activeIndex
+                    val scale by animateFloatAsState(
+                        targetValue = if (isActive) 1.03f else 1.0f,
+                        label = "card_scale"
+                    )
+
+                    Card(
+                        colors = CardDefaults.cardColors(
+                            containerColor = if (isActive) Color(0xFF0F1E36) else Color(0xFF080D1A)
+                        ),
+                        border = BorderStroke(
+                            width = if (isActive) 1.5.dp else 1.dp,
+                            color = if (isActive) Color(0xFF00E5FF) else Color(0xFF132F52)
+                        ),
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier
+                            .width(135.dp)
+                            .scale(scale)
+                            .clickable {
+                                viewModel.setPlaybackPosition(entry.timeMs)
+                            }
+                            .testTag("timeline_chord_item_$index")
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .padding(12.dp)
+                                .fillMaxWidth()
+                        ) {
+                            // Top Row: Time Badge and Indicator
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .background(Color(0xFF1E293B), RoundedCornerShape(4.dp))
+                                        .padding(horizontal = 4.dp, vertical = 2.dp)
+                                ) {
+                                    Text(
+                                        text = entry.timestampLabel,
+                                        fontSize = 8.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color(0xFF94A3B8)
+                                    )
+                                }
+
+                                if (isActive && isPlaying) {
+                                    val pulseAnim by rememberInfiniteTransition(label = "").animateFloat(
+                                        initialValue = 0.4f,
+                                        targetValue = 1.0f,
+                                        animationSpec = infiniteRepeatable(
+                                            animation = tween(600, easing = LinearEasing),
+                                            repeatMode = RepeatMode.Reverse
+                                        ),
+                                        label = "pulse"
+                                    )
+                                    Box(
+                                        modifier = Modifier
+                                            .size(6.dp)
+                                            .background(Color(0xFFEF5350).copy(alpha = pulseAnim), CircleShape)
+                                    )
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.height(8.dp))
+
+                            Text(
+                                text = entry.chordSymbol,
+                                fontSize = 18.sp,
+                                fontWeight = FontWeight.Black,
+                                color = if (isActive) Color(0xFF00E5FF) else Color.White
+                            )
+
+                            Text(
+                                text = entry.chordName,
+                                fontSize = 9.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = if (isActive) Color(0xFFE2E8F0) else Color(0xFF64748B),
+                                maxLines = 1
+                            )
+
+                            Spacer(modifier = Modifier.height(10.dp))
+
+                            Text(
+                                text = "NOTES FOUND",
+                                fontSize = 7.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFF475569)
+                            )
+                            Spacer(modifier = Modifier.height(3.dp))
+                            
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(3.dp)
+                            ) {
+                                entry.notes.take(4).forEach { note ->
+                                    Box(
+                                        modifier = Modifier
+                                            .background(
+                                                if (isActive) Color(0xFF00E5FF).copy(alpha = 0.12f) else Color(0xFF1E293B),
+                                                RoundedCornerShape(3.dp)
+                                            )
+                                            .padding(horizontal = 4.dp, vertical = 1.dp)
+                                    ) {
+                                        Text(
+                                            text = note,
+                                            fontSize = 8.sp,
+                                            fontWeight = FontWeight.Black,
+                                            color = if (isActive) Color(0xFF00E5FF) else Color(0xFF94A3B8)
+                                        )
+                                    }
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.height(8.dp))
+
+                            val durationOfSegment = 3000L
+                            val relativeProgress = ((playPositionMs - entry.timeMs).toFloat() / durationOfSegment).coerceIn(0f, 1f)
+                            if (isActive) {
+                                LinearProgressIndicator(
+                                    progress = { relativeProgress },
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(2.dp)
+                                        .clip(RoundedCornerShape(1.dp)),
+                                    color = Color(0xFF00E5FF),
+                                    trackColor = Color(0xFF1E293B)
+                                )
+                            } else {
+                                Spacer(modifier = Modifier.height(2.dp))
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun UniversalAudioSharingEngineCard(
+    viewModel: WorkstationViewModel
+) {
+    val sharingState by viewModel.universalAudioSharingState.collectAsStateWithLifecycle()
+    var selectedModuleId by remember { mutableStateOf("import") }
+
+    val selectedModule = sharingState.modulesChain.find { it.id == selectedModuleId }
+        ?: sharingState.modulesChain.first()
+
+    Card(
+        colors = CardDefaults.cardColors(containerColor = Color(0xFF030914)),
+        border = BorderStroke(1.dp, Color(0xFF00E5FF).copy(alpha = 0.5f)),
+        shape = RoundedCornerShape(16.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("universal_audio_sharing_engine_card")
+    ) {
+        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            // Title Header
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Icon(
+                        imageVector = Icons.Default.Share,
+                        contentDescription = "Universal Audio Sharing Engine",
+                        tint = Color(0xFF00E5FF),
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Column {
+                        Text(
+                            text = "UNIVERSAL AUDIO SHARING ENGINE™",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Black,
+                            color = Color(0xFF00E5FF),
+                            letterSpacing = 0.5.sp
+                        )
+                        Text(
+                            text = "Direct zero-copy audio routing across all 12 modules • Single Project Session",
+                            fontSize = 9.sp,
+                            color = Color(0xFF8C9BAE)
+                        )
+                    }
+                }
+
+                Surface(
+                    shape = RoundedCornerShape(4.dp),
+                    color = Color(0xFF00E5FF).copy(alpha = 0.15f),
+                    border = BorderStroke(0.5.dp, Color(0xFF00E5FF))
+                ) {
+                    Text(
+                        text = "12 MODULES LINKED",
+                        fontSize = 8.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFF00E5FF),
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                    )
+                }
+            }
+
+            // Shared Project & Audio Memory Pointer Info Bar
+            Card(
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF091628)),
+                border = BorderStroke(0.5.dp, Color(0xFF1E3A60)),
+                shape = RoundedCornerShape(10.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(10.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = sharingState.activeProjectTitle,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White,
+                            maxLines = 1
+                        )
+                        Text(
+                            text = "Source: ${sharingState.audioSourceFileName} • ${sharingState.sampleRateHz}Hz • ${sharingState.bitrateKbps}kbps",
+                            fontSize = 9.sp,
+                            color = Color(0xFFD4AF37)
+                        )
+                        Text(
+                            text = "Engine: ${sharingState.oboeBackendName} • ${String.format("%.1f", sharingState.oboeLatencyMs)}ms Latency",
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = Color(0xFF00E5FF)
+                        )
+                    }
+
+                    Column(horizontalAlignment = Alignment.End) {
+                        Surface(
+                            shape = RoundedCornerShape(4.dp),
+                            color = if (sharingState.oboeEngineRunning) Color(0xFF4CAF50).copy(alpha = 0.2f) else Color.Gray.copy(alpha = 0.2f)
+                        ) {
+                            Text(
+                                text = if (sharingState.oboeEngineRunning) "OBOE STREAM LIVE" else "OBOE STANDBY",
+                                fontSize = 8.sp,
+                                fontWeight = FontWeight.Black,
+                                color = if (sharingState.oboeEngineRunning) Color(0xFF4CAF50) else Color.LightGray,
+                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
+                            )
+                        }
+                        Text(
+                            text = "DUP FILES: ${sharingState.duplicateFilesCreated}",
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.Black,
+                            color = Color(0xFF4CAF50)
+                        )
+                        Text(
+                            text = sharingState.sharedBufferMemoryRef,
+                            fontSize = 8.sp,
+                            color = Color(0xFF8C9BAE)
+                        )
+                    }
+                }
+            }
+
+            // Synchronized Audio Timeline Control Bar
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(Color(0xFF081424), RoundedCornerShape(10.dp))
+                    .padding(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                IconButton(
+                    onClick = { viewModel.toggleSharingPlayback() },
+                    modifier = Modifier.size(32.dp)
+                ) {
+                    Icon(
+                        imageVector = if (sharingState.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                        contentDescription = "Sync Transport Play Pause",
+                        tint = Color(0xFF00E5FF)
+                    )
+                }
+
+                val currentMs = sharingState.currentPlayheadMs
+                val totalMs = sharingState.audioDurationMs.coerceAtLeast(1000L)
+                val curSec = (currentMs / 1000).toInt()
+                val totSec = (totalMs / 1000).toInt()
+
+                Column(modifier = Modifier.weight(1f)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(text = "SYNCHRONIZED AUDIO TIMELINE", fontSize = 8.sp, fontWeight = FontWeight.Bold, color = Color(0xFF00E5FF))
+                        Text(text = "${formatSeconds(curSec)} / ${formatSeconds(totSec)}", fontSize = 9.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                    }
+
+                    Slider(
+                        value = currentMs.toFloat(),
+                        onValueChange = { viewModel.setSharingPlayheadMs(it.toLong()) },
+                        valueRange = 0f..totalMs.toFloat(),
+                        colors = SliderDefaults.colors(
+                            thumbColor = Color(0xFF00E5FF),
+                            activeTrackColor = Color(0xFF00E5FF),
+                            inactiveTrackColor = Color(0xFF1E3A60)
+                        ),
+                        modifier = Modifier.height(20.dp)
+                    )
+                }
+            }
+
+            // 12-Module Sequential Pipeline Flow Diagram
+            Text(
+                text = "ROUTING MATRIX (TAP MODULE TO INSPECT & PASS-THROUGH)",
+                fontSize = 9.sp,
+                fontWeight = FontWeight.Bold,
+                color = Color(0xFF8C9BAE)
+            )
+
+            LazyRow(
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                itemsIndexed(sharingState.modulesChain) { idx, stage ->
+                    val isSelected = stage.id == selectedModuleId
+
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = if (isSelected) Color(0xFF00E5FF) else if (stage.isBypassed) Color(0xFF261D08) else Color(0xFF0D1E36),
+                        border = BorderStroke(
+                            1.dp,
+                            if (isSelected) Color(0xFF00E5FF) else if (stage.isBypassed) Color(0xFFFFB300) else Color(0xFF1E3A60)
+                        ),
+                        modifier = Modifier.clickable { selectedModuleId = stage.id }
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Text(
+                                    text = "${idx + 1}.",
+                                    fontSize = 8.sp,
+                                    fontWeight = FontWeight.Black,
+                                    color = if (isSelected) Color.Black else Color(0xFF00E5FF)
+                                )
+                                Text(
+                                    text = stage.name,
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (isSelected) Color.Black else Color.White
+                                )
+                            }
+                            Text(
+                                text = if (stage.isBypassed) "BYPASSED" else "ACTIVE (0ms)",
+                                fontSize = 8.sp,
+                                color = if (isSelected) Color.Black.copy(alpha = 0.8f) else if (stage.isBypassed) Color(0xFFFFB300) else Color(0xFF4CAF50)
+                            )
+                        }
+                    }
+
+                    if (idx < sharingState.modulesChain.size - 1) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.ArrowForward,
+                            contentDescription = "Routing Arrow",
+                            tint = Color(0xFF00E5FF).copy(alpha = 0.6f),
+                            modifier = Modifier.size(12.dp)
+                        )
+                    }
+                }
+            }
+
+            // Detailed Inspector Drawer for Selected Module
+            val currStage = selectedModule
+            Card(
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF09162A)),
+                border = BorderStroke(0.5.dp, Color(0xFF00E5FF).copy(alpha = 0.4f)),
+                shape = RoundedCornerShape(10.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "MODULE INSPECTOR: ${currStage.name.uppercase()}",
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Black,
+                                color = Color(0xFF00E5FF)
+                            )
+                            Text(
+                                text = currStage.description,
+                                fontSize = 9.sp,
+                                color = Color(0xFFB0BEC5)
+                            )
+                        }
+
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text(
+                                text = if (currStage.isBypassed) "BYPASS" else "PASS-THROUGH",
+                                fontSize = 9.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = if (currStage.isBypassed) Color(0xFFFFB300) else Color(0xFF4CAF50)
+                            )
+                            Switch(
+                                checked = !currStage.isBypassed,
+                                onCheckedChange = { viewModel.toggleSharingModuleBypass(currStage.id) },
+                                colors = SwitchDefaults.colors(
+                                    checkedThumbColor = Color(0xFF00E5FF),
+                                    checkedTrackColor = Color(0xFF102848),
+                                    uncheckedThumbColor = Color(0xFFFFB300),
+                                    uncheckedTrackColor = Color(0xFF261D08)
+                                )
+                            )
+                        }
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "Status: ${currStage.statusMessage}",
+                            fontSize = 9.sp,
+                            color = Color(0xFF8C9BAE)
+                        )
+                        Text(
+                            text = "Latency: ${currStage.syncLatencyMs} ms (Sync Lock)",
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFF4CAF50)
+                        )
+                    }
+
+                    // Gain Trim Control
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(text = "Gain Trim:", fontSize = 9.sp, color = Color.White)
+                        Slider(
+                            value = currStage.gainDb,
+                            onValueChange = { viewModel.setSharingModuleGain(currStage.id, it) },
+                            valueRange = -12f..12f,
+                            colors = SliderDefaults.colors(
+                                thumbColor = Color(0xFFD4AF37),
+                                activeTrackColor = Color(0xFFD4AF37)
+                            ),
+                            modifier = Modifier.weight(1f).height(20.dp)
+                        )
+                        Text(
+                            text = String.format("%+.1f dB", currStage.gainDb),
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFFD4AF37)
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+// -----------------------------------------------------------------
+// PROFESSIONAL 5-STEM DAW MIXER COMPONENT
+// -----------------------------------------------------------------
+@Composable
+fun ProfessionalStemMixerSection(
+    viewModel: WorkstationViewModel,
+    successState: StemSeparationState.Success,
+    onOpenSendToDialog: (sourceName: String) -> Unit = {}
+) {
+    val isPlaying by viewModel.isStemPlaybackActive.collectAsStateWithLifecycle()
+    val mixer = successState.mixerState
+
+    Card(
+        colors = CardDefaults.cardColors(containerColor = Color(0xFF040A17)),
+        border = BorderStroke(1.dp, Color(0xFF1E3A60)),
+        shape = RoundedCornerShape(16.dp),
+        modifier = Modifier.fillMaxWidth().testTag("professional_stem_mixer_card")
+    ) {
+        Column(modifier = Modifier.padding(14.dp)) {
+            // Section Header
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Default.GraphicEq,
+                        contentDescription = "Stem Mixer Icon",
+                        tint = Color(0xFF00E5FF),
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Column {
+                        Text(
+                            text = "PROFESSIONAL 5-STEM DAW MIXER",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Black,
+                            color = Color.White,
+                            letterSpacing = 1.sp
+                        )
+                        Text(
+                            text = "SYNCHRONIZED ZERO-LATENCY CHANNEL ROUTING",
+                            fontSize = 8.sp,
+                            color = Color(0xFF64748B),
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    UniversalSendToButton(
+                        sourceName = "Full 5-Stem Mix",
+                        buttonText = "SEND MIX TO...",
+                        accentColor = Color(0xFF00E5FF),
+                        onOpenSendToDialog = onOpenSendToDialog
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(14.dp))
+
+            // QUICK STEM ISOLATION BAR
+            Text(
+                text = "SOLO SINGLE STEM (QUICK ISOLATE)",
+                fontSize = 8.sp,
+                fontWeight = FontWeight.Black,
+                color = Color(0xFF94A3B8),
+                letterSpacing = 1.2.sp
+            )
+            Spacer(modifier = Modifier.height(6.dp))
+
+            // Scrollable Row for 5 stems solo isolation
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                val stemList = listOf(
+                    Triple("guitar", "Only Guitar", "🎸"),
+                    Triple("bass", "Only Bass", "🎸"),
+                    Triple("piano", "Only Piano", "🎹"),
+                    Triple("vocals", "Only Vocals", "🎤"),
+                    Triple("drums", "Only Drums", "🥁")
+                )
+
+                stemList.forEach { (id, label, emoji) ->
+                    val isSoloedOnly = mixer.channels.any { it.id == id && it.isSoloed } && mixer.channels.count { it.isSoloed } == 1
+                    Button(
+                        onClick = { viewModel.playOnlyStem(id) },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (isSoloedOnly) Color(0xFFFFD700) else Color(0xFF13243C),
+                            contentColor = if (isSoloedOnly) Color.Black else Color.White
+                        ),
+                        shape = RoundedCornerShape(6.dp),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                        modifier = Modifier.height(30.dp).testTag("quick_solo_$id")
+                    ) {
+                        Text("$emoji $label", fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+
+                // Clear All / Reset Button
+                Button(
+                    onClick = { viewModel.clearStemSoloAndMute() },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = Color(0xFF00E5FF).copy(alpha = 0.2f),
+                        contentColor = Color(0xFF00E5FF)
+                    ),
+                    shape = RoundedCornerShape(6.dp),
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                    modifier = Modifier.height(30.dp).testTag("quick_unsolo_all")
+                ) {
+                    Text("🔄 All Stems On", fontSize = 9.sp, fontWeight = FontWeight.Black)
+                }
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            // MULTI-STEM COMBINATION PRESETS
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                val combos = listOf(
+                    Pair("Guitar + Vocals", setOf("guitar", "vocals")),
+                    Pair("Bass + Drums", setOf("bass", "drums")),
+                    Pair("Piano + Vocals", setOf("piano", "vocals")),
+                    Pair("Guitar + Bass + Drums", setOf("guitar", "bass", "drums"))
+                )
+
+                combos.forEach { (comboLabel, setIds) ->
+                    OutlinedButton(
+                        onClick = { viewModel.playCombinationStems(setIds) },
+                        border = BorderStroke(1.dp, Color(0xFF1E3A60)),
+                        shape = RoundedCornerShape(6.dp),
+                        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp),
+                        modifier = Modifier.weight(1f).height(28.dp).testTag("combo_${setIds.joinToString("_")}")
+                    ) {
+                        Text(comboLabel, fontSize = 7.5.sp, color = Color(0xFFCBD5E1), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(14.dp))
+
+            // 5 INDIVIDUAL STEM CHANNEL STRIPS
+            Text(
+                text = "INDIVIDUAL CHANNEL STRIPS (SOLO / MUTE / FADER / SEND TO)",
+                fontSize = 8.sp,
+                fontWeight = FontWeight.Black,
+                color = Color(0xFF94A3B8),
+                letterSpacing = 1.2.sp
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+
+            mixer.channels.forEach { channel ->
+                val isEffectiveActive = mixer.isChannelActive(channel.id)
+                StemChannelStripCard(
+                    channel = channel,
+                    isPlaying = isPlaying,
+                    isEffectiveActive = isEffectiveActive,
+                    onVolumeChange = { newVol -> viewModel.engine.adjustStemVolume(channel.id, newVol) },
+                    onSoloToggle = { viewModel.toggleStemSolo(channel.id) },
+                    onMuteToggle = { viewModel.toggleStemMute(channel.id) },
+                    onPlayOnly = { viewModel.playOnlyStem(channel.id) },
+                    onOpenSendToDialog = onOpenSendToDialog
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+            }
+
+            // Sync Verification Footer
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(Color(0xFF030712), RoundedCornerShape(8.dp))
+                    .padding(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        modifier = Modifier
+                            .size(6.dp)
+                            .background(Color(0xFF10B981), CircleShape)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "SYNCHRONIZED AUDIOTRACK STREAM • ZERO DRIFT",
+                        fontSize = 8.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFF10B981)
+                    )
+                }
+
+                val activeCount = mixer.channels.count { mixer.isChannelActive(it.id) }
+                Text(
+                    text = "$activeCount / 5 CHANNELS ACTIVE",
+                    fontSize = 8.sp,
+                    fontWeight = FontWeight.Black,
+                    color = Color(0xFF00E5FF)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+fun StemChannelStripCard(
+    channel: StemChannelData,
+    isPlaying: Boolean,
+    isEffectiveActive: Boolean,
+    onVolumeChange: (Float) -> Unit,
+    onSoloToggle: () -> Unit,
+    onMuteToggle: () -> Unit,
+    onPlayOnly: () -> Unit,
+    onOpenSendToDialog: (sourceName: String) -> Unit = {}
+) {
+    val stemColor = Color(channel.colorHex)
+    val containerBg = if (channel.isSoloed) {
+        Color(0xFFFFD700).copy(alpha = 0.08f)
+    } else if (channel.isMuted) {
+        Color(0xFFEF5350).copy(alpha = 0.06f)
+    } else {
+        Color(0xFF081224)
+    }
+
+    val borderCol = if (channel.isSoloed) {
+        Color(0xFFFFD700)
+    } else if (channel.isMuted) {
+        Color(0xFFEF5350).copy(alpha = 0.5f)
+    } else {
+        Color(0xFF1E3A60)
+    }
+
+    Card(
+        colors = CardDefaults.cardColors(containerColor = containerBg),
+        border = BorderStroke(1.dp, borderCol),
+        shape = RoundedCornerShape(10.dp),
+        modifier = Modifier.fillMaxWidth().testTag("stem_channel_card_${channel.id}")
+    ) {
+        Column(modifier = Modifier.padding(10.dp)) {
+            // Header: Emoji, Title, Freq Range & Status
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(text = channel.iconEmoji, fontSize = 16.sp)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Column {
+                        Text(
+                            text = channel.name.uppercase(),
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Black,
+                            color = Color.White
+                        )
+                        Text(
+                            text = channel.frequencyRange,
+                            fontSize = 8.sp,
+                            color = Color(0xFF64748B)
+                        )
+                    }
+                }
+
+                // Controls: Solo (S) & Mute (M) Buttons + Universal Send To
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    // SOLO Button
+                    Button(
+                        onClick = onSoloToggle,
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (channel.isSoloed) Color(0xFFFFD700) else Color(0xFF13243C),
+                            contentColor = if (channel.isSoloed) Color.Black else Color(0xFFFFD700)
+                        ),
+                        shape = RoundedCornerShape(4.dp),
+                        contentPadding = PaddingValues(0.dp),
+                        modifier = Modifier.size(28.dp).testTag("stem_solo_${channel.id}")
+                    ) {
+                        Text(text = "S", fontSize = 11.sp, fontWeight = FontWeight.Black)
+                    }
+
+                    // MUTE Button
+                    Button(
+                        onClick = onMuteToggle,
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (channel.isMuted) Color(0xFFEF5350) else Color(0xFF13243C),
+                            contentColor = if (channel.isMuted) Color.White else Color(0xFFEF5350)
+                        ),
+                        shape = RoundedCornerShape(4.dp),
+                        contentPadding = PaddingValues(0.dp),
+                        modifier = Modifier.size(28.dp).testTag("stem_mute_${channel.id}")
+                    ) {
+                        Text(text = "M", fontSize = 11.sp, fontWeight = FontWeight.Black)
+                    }
+
+                    // Quick Only Chip
+                    OutlinedButton(
+                        onClick = onPlayOnly,
+                        border = BorderStroke(1.dp, stemColor.copy(alpha = 0.5f)),
+                        shape = RoundedCornerShape(4.dp),
+                        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
+                        modifier = Modifier.height(28.dp).testTag("stem_only_${channel.id}")
+                    ) {
+                        Text("ONLY", fontSize = 8.sp, fontWeight = FontWeight.Bold, color = stemColor)
+                    }
+
+                    // Universal Send To Button
+                    UniversalSendToButton(
+                        sourceName = "Separated ${channel.name} Stem",
+                        buttonText = "SEND TO",
+                        accentColor = stemColor,
+                        onOpenSendToDialog = onOpenSendToDialog
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // Volume Fader Slider & Readout
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Icon(
+                    imageVector = if (channel.volume <= 0.01f || channel.isMuted) Icons.Default.VolumeOff else Icons.Default.VolumeUp,
+                    contentDescription = "Volume icon",
+                    tint = if (isEffectiveActive) stemColor else Color.Gray,
+                    modifier = Modifier.size(16.dp)
+                )
+
+                Slider(
+                    value = channel.volume,
+                    onValueChange = onVolumeChange,
+                    valueRange = 0.0f..1.5f,
+                    colors = SliderDefaults.colors(
+                        thumbColor = stemColor,
+                        activeTrackColor = stemColor,
+                        inactiveTrackColor = Color(0xFF1E3A60)
+                    ),
+                    modifier = Modifier.weight(1f).height(24.dp).testTag("stem_fader_${channel.id}")
+                )
+
+                val gainDbText = if (channel.isMuted) {
+                    "MUTED"
+                } else if (channel.volume <= 0.001f) {
+                    "-∞ dB"
+                } else {
+                    val db = (20 * Math.log10(channel.volume.toDouble())).toFloat()
+                    String.format("%+.1f dB", db)
+                }
+
+                Text(
+                    text = gainDbText,
+                    fontSize = 9.sp,
+                    fontWeight = FontWeight.Black,
+                    color = if (channel.isMuted) Color(0xFFEF5350) else Color.White,
+                    modifier = Modifier.widthIn(min = 45.dp)
+                )
+            }
+
+            // Peak VU Level Meter
+            if (isPlaying && isEffectiveActive) {
+                Spacer(modifier = Modifier.height(4.dp))
+                val infiniteMeter = rememberInfiniteTransition(label = "meter_${channel.id}")
+                val meterValue by infiniteMeter.animateFloat(
+                    initialValue = 0.2f,
+                    targetValue = channel.peakLevel * channel.volume.coerceAtMost(1.0f),
+                    animationSpec = infiniteRepeatable(
+                        animation = tween(durationMillis = 250, easing = LinearEasing),
+                        repeatMode = RepeatMode.Reverse
+                    ),
+                    label = "meter_val"
+                )
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(4.dp)
+                        .background(Color(0xFF030712), RoundedCornerShape(2.dp))
+                        .clip(RoundedCornerShape(2.dp))
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxHeight()
+                            .fillMaxWidth(meterValue.coerceIn(0.05f, 1.0f))
+                            .background(
+                                Brush.horizontalGradient(
+                                    listOf(Color(0xFF10B981), Color(0xFFFFD700), Color(0xFFEF5350))
+                                )
+                            )
+                    )
+                }
+            }
+        }
+    }
 }

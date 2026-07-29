@@ -22,4 +22,19 @@ class MusicWorkstationRepository(private val workstationDao: WorkstationDao) {
     suspend fun updateLickFavorite(id: Int, isFavorite: Boolean) = workstationDao.updateLickFavorite(id, isFavorite)
 
     suspend fun deleteLickById(id: Int) = workstationDao.deleteLickById(id)
+
+    // Smart Module State Repository
+    val allModuleStates: Flow<List<SmartModuleStateEntity>> = workstationDao.getAllModuleStatesFlow()
+
+    suspend fun getModuleState(moduleId: String): SmartModuleStateEntity? = workstationDao.getModuleState(moduleId)
+
+    suspend fun saveModuleState(state: SmartModuleStateEntity) = workstationDao.saveModuleState(state)
+
+    suspend fun deleteModuleState(moduleId: String) = workstationDao.deleteModuleState(moduleId)
+
+    suspend fun clearAllModuleStates() = workstationDao.clearAllModuleStates()
+
+    suspend fun getGlobalSession(): AppGlobalSessionEntity? = workstationDao.getGlobalSession()
+
+    suspend fun saveGlobalSession(session: AppGlobalSessionEntity) = workstationDao.saveGlobalSession(session)
 }
