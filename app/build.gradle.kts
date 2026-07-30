@@ -121,9 +121,8 @@ dependencies {
   "ksp"(libs.moshi.kotlin.codegen)
 
   // Advanced Audio Workstation DSP & Neural Extensions
-  // Prefabricated C++ / Native audio engine bindings (Uncomment for local Android Studio development)
-  // implementation(libs.oboe)
-  // implementation(libs.onnxruntime.android)
+  implementation(libs.oboe)
+  implementation(libs.onnxruntime.android)
   
   // Dependency injection, room & multimedia framework components
   implementation(libs.hilt.android)

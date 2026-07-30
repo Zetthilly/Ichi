@@ -58,6 +58,7 @@ import com.example.audio.StemSeparationState
 import com.example.data.StemMixerState
 import com.example.data.StemChannelData
 import com.example.data.ProjectSession
+import com.example.ui.recording.RecordingLibraryScreen
 import com.example.data.GuitarLick
 import com.example.viewmodel.WorkstationViewModel
 import com.example.ui.navigation.*
@@ -926,17 +927,20 @@ fun MasterSynchronizedPlaybackBar(
     viewModel: WorkstationViewModel,
     onOpenSendToDialog: (sourceName: String) -> Unit = {}
 ) {
-    val isPlaying by viewModel.isStemPlaybackActive.collectAsStateWithLifecycle()
-    val posMs by viewModel.playbackPositionMs.collectAsStateWithLifecycle()
+    val masterEngine = viewModel.masterAudioEngine
+    val loadedMeta by masterEngine.loadedMetadata.collectAsStateWithLifecycle()
+    val isAudioLoaded = loadedMeta != null
+    val isPlaying by masterEngine.isPlaying.collectAsStateWithLifecycle()
+    val posMs by masterEngine.currentPositionMs.collectAsStateWithLifecycle()
+    val durationMs by masterEngine.durationMs.collectAsStateWithLifecycle()
     val currentChordModel by viewModel.currentChord.collectAsStateWithLifecycle()
     val currentSection by viewModel.currentSongSection.collectAsStateWithLifecycle()
     val pitchShift by viewModel.pitchShiftSemitones.collectAsStateWithLifecycle()
     val isLooping by viewModel.isLoopingEnabled.collectAsStateWithLifecycle()
     val speedMultiplier by viewModel.tempoPreservedMultiplier.collectAsStateWithLifecycle()
-    val bpm by viewModel.bpm.collectAsStateWithLifecycle()
 
-    val formattedCurrentTime = String.format("%02d:%02d.%d", (posMs / 1000) / 60, (posMs / 1000) % 60, (posMs % 1000) / 100)
-    val formattedTotalTime = "00:24.0"
+    val formattedCurrentTime = if (isAudioLoaded) String.format("%02d:%02d.%d", (posMs / 1000) / 60, (posMs / 1000) % 60, (posMs % 1000) / 100) else "00:00.0"
+    val formattedTotalTime = if (isAudioLoaded) String.format("%02d:%02d.%d", (durationMs / 1000) / 60, (durationMs / 1000) % 60, (durationMs % 1000) / 100) else "00:00.0"
 
     Surface(
         color = Color(0xFF070F1C),
@@ -964,8 +968,8 @@ fun MasterSynchronizedPlaybackBar(
 
                 Slider(
                     value = posMs.toFloat(),
-                    onValueChange = { viewModel.setPlaybackPosition(it.toLong()) },
-                    valueRange = 0f..24000f,
+                    onValueChange = { masterEngine.seekTo(it.toLong()) },
+                    valueRange = 0f..(durationMs.toFloat().coerceAtLeast(1000f)),
                     colors = SliderDefaults.colors(
                         thumbColor = Color(0xFF00E5FF),
                         activeTrackColor = Color(0xFF00E5FF),
@@ -1058,7 +1062,7 @@ fun MasterSynchronizedPlaybackBar(
                             Icon(Icons.Default.MusicNote, "Chord", tint = Color(0xFFD4AF37), modifier = Modifier.size(10.dp))
                             Spacer(modifier = Modifier.width(2.dp))
                             Text(
-                                text = currentChordModel?.name ?: "—",
+                                text = if (isAudioLoaded) (currentChordModel?.name ?: "--") else "--",
                                 fontSize = 9.sp,
                                 fontWeight = FontWeight.Black,
                                 color = Color(0xFFD4AF37)
@@ -5026,7 +5030,7 @@ fun LibrarySessionTab(
     val licks by viewModel.allLicks.collectAsStateWithLifecycle()
 
     var searchQuery by remember { mutableStateOf("") }
-    var selectedTab by remember { mutableStateOf("Sessions") } // Sessions vs Licks
+    var selectedTab by remember { mutableStateOf("Recordings") } // Recordings vs Sessions vs Licks
 
     Column(
         modifier = Modifier
@@ -5043,6 +5047,19 @@ fun LibrarySessionTab(
                 .padding(4.dp)
         ) {
             Button(
+                onClick = { selectedTab = "Recordings" },
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = if (selectedTab == "Recordings") Color(0xFF00E5FF) else Color.Transparent,
+                    contentColor = if (selectedTab == "Recordings") Color.Black else Color.White
+                ),
+                shape = RoundedCornerShape(6.dp),
+                modifier = Modifier
+                    .weight(1f)
+                    .height(36.dp)
+            ) {
+                Text("Recording Storage", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+            }
+            Button(
                 onClick = { selectedTab = "Sessions" },
                 colors = ButtonDefaults.buttonColors(
                     containerColor = if (selectedTab == "Sessions") Color(0xFF00E5FF) else Color.Transparent,
@@ -5053,7 +5070,7 @@ fun LibrarySessionTab(
                     .weight(1f)
                     .height(36.dp)
             ) {
-                Text("Saved Sessions Databases", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                Text("Saved Sessions", fontSize = 11.sp, fontWeight = FontWeight.Bold)
             }
             Button(
                 onClick = { selectedTab = "Licks" },
@@ -5066,28 +5083,17 @@ fun LibrarySessionTab(
                     .weight(1f)
                     .height(36.dp)
             ) {
-                Text("Recognized Licks Library", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                Text("Licks Library", fontSize = 11.sp, fontWeight = FontWeight.Bold)
             }
         }
 
-        // Search Input Box
-        OutlinedTextField(
-            value = searchQuery,
-            onValueChange = { searchQuery = it },
-            placeholder = { Text("Search title, tags, keys...", color = Color(0xFF5E718B)) },
-            leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, tint = Color(0xFF5E718B)) },
-            modifier = Modifier
-                .fillMaxWidth()
-                .testTag("library_search_input"),
-            colors = OutlinedTextFieldDefaults.colors(
-                focusedBorderColor = Color(0xFF00E5FF),
-                unfocusedBorderColor = Color(0xFF132F52)
-            ),
-            singleLine = true
-        )
-
         // Contents
-        if (selectedTab == "Sessions") {
+        if (selectedTab == "Recordings") {
+            RecordingLibraryScreen(
+                viewModel = viewModel,
+                modifier = Modifier.weight(1f)
+            )
+        } else if (selectedTab == "Sessions") {
             val filteredSessions = sessions.filter {
                 it.title.contains(searchQuery, ignoreCase = true) ||
                 it.categoryTags.contains(searchQuery, ignoreCase = true) ||

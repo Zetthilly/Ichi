@@ -59,4 +59,26 @@ interface WorkstationDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun saveGlobalSession(session: AppGlobalSessionEntity)
+
+    // Recording Storage & Reuse System queries
+    @Query("SELECT * FROM recording_assets ORDER BY dateCreated DESC")
+    fun getAllRecordingsFlow(): Flow<List<RecordingAssetEntity>>
+
+    @Query("SELECT * FROM recording_assets WHERE id = :id LIMIT 1")
+    suspend fun getRecordingById(id: String): RecordingAssetEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertRecording(recording: RecordingAssetEntity)
+
+    @Update
+    suspend fun updateRecording(recording: RecordingAssetEntity)
+
+    @Query("DELETE FROM recording_assets WHERE id = :id")
+    suspend fun deleteRecordingById(id: String)
+
+    @Query("UPDATE recording_assets SET isFavorite = :isFavorite WHERE id = :id")
+    suspend fun updateRecordingFavorite(id: String, isFavorite: Boolean)
+
+    @Query("SELECT * FROM recording_assets WHERE recordingName LIKE '%' || :query || '%' OR userNotes LIKE '%' || :query || '%' ORDER BY dateCreated DESC")
+    fun searchRecordings(query: String): Flow<List<RecordingAssetEntity>>
 }

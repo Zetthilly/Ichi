@@ -1,5 +1,9 @@
 package com.example.ui.modules
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import android.net.Uri
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -20,11 +24,18 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.audio.*
+import com.example.ui.AfricanMusicIntelligenceCard
+import com.example.ui.InstrumentSynchronizerView
+import com.example.ui.LearnAsYouPlayCard
 import com.example.ui.PitchAndTimeControlPanel
+import com.example.ui.PracticeCenterWorkspace
+import com.example.ui.ProfessionalVisualAnalyzersCard
 import com.example.ui.UniversalSendToButton
 import com.example.ui.navigation.AppModuleRegistry
 import com.example.ui.navigation.AppModule
 import com.example.ui.navigation.ModuleToolbar
+import com.example.ui.recording.RecordingLibraryScreen
 import com.example.viewmodel.WorkstationViewModel
 
 @Composable
@@ -169,9 +180,13 @@ fun DedicatedModuleWorkspace(
                         Spacer(modifier = Modifier.height(12.dp))
 
                         when (module.id) {
+                            "recorder", "library" -> RecordingLibraryScreen(viewModel)
                             "audio_player" -> AudioPlayerWorkspaceContent(viewModel, onOpenSendToDialog)
                             "dsp" -> PitchAndTimeControlPanel(viewModel, onOpenSendToDialog = onOpenSendToDialog)
                             "arpeggio" -> ArpeggioWorkspaceContent(viewModel)
+                            "piano", "guitar" -> InstrumentVoicingsWorkspaceContent(viewModel)
+                            "analyzer" -> AnalyzerWorkspaceContent(viewModel)
+                            "quiz" -> PracticeCenterWorkspace(viewModel)
                             "bpm" -> BpmWorkspaceContent(viewModel)
                             "key_detection" -> KeyDetectionWorkspaceContent(viewModel)
                             "phrase_rec" -> PhraseRecWorkspaceContent(viewModel)
@@ -234,43 +249,235 @@ private fun AudioPlayerWorkspaceContent(
     viewModel: WorkstationViewModel,
     onOpenSendToDialog: (sourceName: String) -> Unit = {}
 ) {
-    val isPlaying by viewModel.isStemPlaybackActive.collectAsStateWithLifecycle()
-    val playheadMs by viewModel.playbackPositionMs.collectAsStateWithLifecycle()
-    val uploadedFileName by viewModel.uploadedFileName.collectAsStateWithLifecycle()
+    val context = LocalContext.current
+    val masterEngine = viewModel.masterAudioEngine
+    val isPlaying by masterEngine.isPlaying.collectAsStateWithLifecycle()
+    val playheadMs by masterEngine.currentPositionMs.collectAsStateWithLifecycle()
+    val durationMs by masterEngine.durationMs.collectAsStateWithLifecycle()
+    val diagnostics by masterEngine.diagnostics.collectAsStateWithLifecycle()
+    val errorMessage by masterEngine.errorMessage.collectAsStateWithLifecycle()
+
+    val filePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            masterEngine.loadAudioUri(uri)
+        }
+    }
 
     Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
-        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Text("STAGED FILE: ${uploadedFileName ?: "Demo Project Session"}", fontSize = 12.sp, color = Color.White, fontWeight = FontWeight.Bold)
-            Text("PLAYHEAD: ${playheadMs / 1000}s / 214s", fontSize = 11.sp, color = Color(0xFF00E5FF))
-
-            LinearProgressIndicator(
-                progress = { (playheadMs % 214000L).toFloat() / 214000f },
-                modifier = Modifier.fillMaxWidth().height(8.dp),
-                color = Color(0xFF00E5FF),
-                trackColor = Color(0xFF132F52)
-            )
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+        if (!diagnostics.isAudioLoaded) {
+            // Centered "No Audio Loaded" Placeholder
+            Surface(
+                shape = RoundedCornerShape(16.dp),
+                color = Color(0xFF0B172B),
+                border = BorderStroke(1.dp, Color(0xFF132F52)),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("no_audio_loaded_placeholder")
             ) {
-                Button(
-                    onClick = { viewModel.toggleMasterPlayback() },
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF00E5FF)),
-                    modifier = Modifier.weight(1f)
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(32.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(16.dp)
                 ) {
-                    Text(if (isPlaying) "PAUSE AUDIO" else "PLAY AUDIO", color = Color(0xFF030814), fontWeight = FontWeight.Bold)
-                }
+                    Surface(
+                        shape = CircleShape,
+                        color = Color(0xFF132F52),
+                        modifier = Modifier.size(64.dp)
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(
+                                imageVector = Icons.Default.GraphicEq,
+                                contentDescription = "No Audio",
+                                tint = Color(0xFF00E5FF),
+                                modifier = Modifier.size(32.dp)
+                            )
+                        }
+                    }
 
-                Button(
-                    onClick = { viewModel.setPlaybackPosition(0L) },
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF132F52)),
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Text("RESTART", color = Color.White)
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(
+                            text = "No Audio Loaded",
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "Import or record an audio file to begin harmonic analysis and playback.",
+                            fontSize = 12.sp,
+                            color = Color(0xFF94A3B8),
+                            modifier = Modifier.padding(horizontal = 16.dp)
+                        )
+                    }
+
+                    if (errorMessage != null) {
+                        Surface(
+                            shape = RoundedCornerShape(6.dp),
+                            color = Color(0xFF331010),
+                            border = BorderStroke(1.dp, Color(0xFFFF5252))
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Icon(Icons.Default.Warning, contentDescription = null, tint = Color(0xFFFF5252), modifier = Modifier.size(16.dp))
+                                Text(
+                                    text = errorMessage ?: "",
+                                    fontSize = 11.sp,
+                                    color = Color(0xFFFF8888)
+                                )
+                            }
+                        }
+                    }
+
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Button(
+                            onClick = { filePickerLauncher.launch("audio/*") },
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF00E5FF)),
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier.weight(1f).testTag("import_audio_button")
+                        ) {
+                            Icon(Icons.Default.UploadFile, contentDescription = null, tint = Color.Black)
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Import Audio", color = Color.Black, fontWeight = FontWeight.Bold)
+                        }
+
+                        Button(
+                            onClick = { viewModel.setSection("Studio") },
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1E293B)),
+                            border = BorderStroke(1.dp, Color(0xFF00E5FF)),
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier.weight(1f).testTag("record_audio_button")
+                        ) {
+                            Icon(Icons.Default.Mic, contentDescription = null, tint = Color(0xFF00E5FF))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Record Audio", color = Color(0xFF00E5FF), fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+            }
+        } else {
+            // Audio Source Loaded Card
+            Surface(
+                shape = RoundedCornerShape(12.dp),
+                color = Color(0xFF0B172B),
+                border = BorderStroke(1.dp, Color(0xFF10B981)),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Box(
+                                modifier = Modifier
+                                    .size(10.dp)
+                                    .background(Color(0xFF10B981), CircleShape)
+                            )
+                            Text(
+                                text = "REAL AUDIO LOADED",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFF10B981)
+                            )
+                        }
+
+                        Surface(
+                            shape = RoundedCornerShape(4.dp),
+                            color = Color(0xFF132F52)
+                        ) {
+                            Text(
+                                text = diagnostics.playerState.name,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFF00E5FF),
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                            )
+                        }
+                    }
+
+                    Text(
+                        text = "FILE: ${diagnostics.currentFileName}",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White
+                    )
+
+                    // Progress Bar
+                    val safeDuration = durationMs.coerceAtLeast(1L)
+                    val progressFraction = (playheadMs.toFloat() / safeDuration.toFloat()).coerceIn(0f, 1f)
+
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text("PLAYHEAD: ${playheadMs / 1000}s", fontSize = 11.sp, color = Color(0xFF00E5FF))
+                            Text("TOTAL: ${durationMs / 1000}s", fontSize = 11.sp, color = Color(0xFF5E718B))
+                        }
+
+                        LinearProgressIndicator(
+                            progress = { progressFraction },
+                            modifier = Modifier.fillMaxWidth().height(8.dp),
+                            color = Color(0xFF00E5FF),
+                            trackColor = Color(0xFF132F52)
+                        )
+                    }
+
+                    // Transport Controls & Close Project Button
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Button(
+                            onClick = { viewModel.toggleMasterPlayback() },
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF00E5FF)),
+                            modifier = Modifier.weight(1f).testTag("master_play_button")
+                        ) {
+                            Icon(if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow, contentDescription = null, tint = Color.Black)
+                            Spacer(Modifier.width(4.dp))
+                            Text(if (isPlaying) "PAUSE" else "PLAY", color = Color.Black, fontWeight = FontWeight.Bold)
+                        }
+
+                        Button(
+                            onClick = { masterEngine.stop() },
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF132F52)),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(Icons.Default.Stop, contentDescription = null, tint = Color.White)
+                            Spacer(Modifier.width(4.dp))
+                            Text("STOP", color = Color.White, fontWeight = FontWeight.Bold)
+                        }
+
+                        Button(
+                            onClick = { viewModel.closeProject() },
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF331010)),
+                            border = BorderStroke(1.dp, Color(0xFFFF5252)),
+                            modifier = Modifier.weight(1f).testTag("close_project_button")
+                        ) {
+                            Icon(Icons.Default.Close, contentDescription = null, tint = Color(0xFFFF5252))
+                            Spacer(Modifier.width(4.dp))
+                            Text("CLOSE", color = Color(0xFFFF8888), fontWeight = FontWeight.Bold)
+                        }
+                    }
                 }
             }
         }
+
+        // Audio Diagnostics Panel
+        AudioDiagnosticsPanelCard(diagnostics)
 
         PitchAndTimeControlPanel(
             viewModel = viewModel,
@@ -280,42 +487,167 @@ private fun AudioPlayerWorkspaceContent(
 }
 
 @Composable
-private fun ArpeggioWorkspaceContent(viewModel: WorkstationViewModel) {
-    var selectedPattern by remember { mutableStateOf("Ascending 16ths") }
-    val patterns = listOf("Ascending 16ths", "Descending 8ths", "Alberti Bass", "African Soukous 3-2")
-
-    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        Text("SMART ARPEGGIO PATTERN GENERATOR", fontSize = 12.sp, color = Color(0xFFD4AF37), fontWeight = FontWeight.Bold)
-
-        patterns.forEach { pattern ->
-            Surface(
-                shape = RoundedCornerShape(8.dp),
-                color = if (selectedPattern == pattern) Color(0xFF241C04) else Color(0xFF0B172B),
-                border = BorderStroke(1.dp, if (selectedPattern == pattern) Color(0xFFD4AF37) else Color(0xFF132F52)),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable { selectedPattern = pattern }
+fun AudioDiagnosticsPanelCard(diagnostics: com.example.audio.AudioDiagnosticsInfo) {
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = Color(0xFF081220),
+        border = BorderStroke(1.dp, Color(0xFF132F52)),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Row(
-                    modifier = Modifier.padding(12.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Icon(Icons.Default.Analytics, contentDescription = null, tint = Color(0xFF00E5FF), modifier = Modifier.size(18.dp))
+                    Text("AUDIO DIAGNOSTICS PANEL", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                }
+                Surface(
+                    shape = RoundedCornerShape(4.dp),
+                    color = if (diagnostics.isAudioLoaded) Color(0xFF064E3B) else Color(0xFF450A0A)
                 ) {
-                    Text(pattern, fontSize = 12.sp, color = Color.White, fontWeight = FontWeight.Bold)
-                    if (selectedPattern == pattern) {
-                        Text("ACTIVE", fontSize = 10.sp, color = Color(0xFFD4AF37), fontWeight = FontWeight.Black)
-                    }
+                    Text(
+                        text = if (diagnostics.isAudioLoaded) "PASS - SOURCE VALIDATED" else "STANDBY - IDLE ENGINE",
+                        fontSize = 9.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = if (diagnostics.isAudioLoaded) Color(0xFF34D399) else Color(0xFFFCA5A5),
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                    )
+                }
+            }
+
+            HorizontalDivider(color = Color(0xFF132F52))
+
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                DiagnosticItem("Audio Loaded:", if (diagnostics.isAudioLoaded) "YES" else "NO", if (diagnostics.isAudioLoaded) Color(0xFF10B981) else Color(0xFFFF5252))
+                DiagnosticItem("Decoder Status:", diagnostics.decoderStatus, Color(0xFF00E5FF))
+            }
+
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                DiagnosticItem("Sample Rate:", "${diagnostics.sampleRateHz} Hz", Color.White)
+                DiagnosticItem("Channels:", diagnostics.channels, Color.White)
+            }
+
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                DiagnosticItem("Player State:", diagnostics.playerState.name, Color(0xFFFFD700))
+                DiagnosticItem("Buffer Status:", "${diagnostics.bufferedMs} ms", Color(0xFF00E5FF))
+            }
+
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text("Output Device Architecture:", fontSize = 10.sp, color = Color(0xFF5E718B))
+                Text(diagnostics.outputDevice, fontSize = 10.sp, color = Color.LightGray, fontWeight = FontWeight.Medium)
+            }
+        }
+    }
+}
+
+@Composable
+private fun DiagnosticItem(label: String, value: String, valueColor: Color) {
+    Column {
+        Text(label, fontSize = 10.sp, color = Color(0xFF5E718B))
+        Text(value, fontSize = 11.sp, fontWeight = FontWeight.Bold, color = valueColor)
+    }
+}
+
+@Composable
+private fun ArpeggioWorkspaceContent(viewModel: WorkstationViewModel) {
+    val activeNotes by viewModel.activePerformanceNotes.collectAsStateWithLifecycle()
+    val rawNoteNames = activeNotes.map { it.cleanNoteName }
+    val arpeggioResult = remember(rawNoteNames) {
+        com.example.data.AdvancedArpeggioEngine.analyzeNoteStream(rawNoteNames)
+    }
+
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Text("ADVANCED ARPEGGIO INTELLIGENCE ENGINE", fontSize = 12.sp, color = Color(0xFFD4AF37), fontWeight = FontWeight.Bold)
+
+        Surface(
+            shape = RoundedCornerShape(10.dp),
+            color = Color(0xFF181308),
+            border = BorderStroke(1.dp, Color(0xFFD4AF37)),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text("Detected Pattern:", fontSize = 10.sp, color = Color(0xFF94A3B8))
+                    Text(arpeggioResult.patternType.displayName, fontSize = 12.sp, fontWeight = FontWeight.Bold, color = arpeggioResult.patternType.accentColor)
+                }
+
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text("Parent Chord:", fontSize = 10.sp, color = Color(0xFF94A3B8))
+                    Text(arpeggioResult.inferredParentChord, fontSize = 14.sp, fontWeight = FontWeight.Black, color = Color.White)
+                }
+
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text("Current Phrase:", fontSize = 10.sp, color = Color(0xFF94A3B8))
+                    Text(arpeggioResult.currentPhrase, fontSize = 11.sp, color = Color(0xFFCBD5E1))
+                }
+
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text("Analysis Confidence:", fontSize = 10.sp, color = Color(0xFF94A3B8))
+                    Text("${(arpeggioResult.confidence * 100).toInt()}%", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color(0xFF10B981))
                 }
             }
         }
 
-        Button(
-            onClick = { viewModel.engine.tapLiveMusicalNote("C E G B") },
-            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFD4AF37)),
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Text("GENERATE ARPEGGIO LICK", color = Color.Black, fontWeight = FontWeight.Bold)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(
+                onClick = { viewModel.feedPerformanceNotes(listOf("C", "E", "G", "B"), "Cmaj7") },
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFD4AF37)),
+                modifier = Modifier.weight(1f)
+            ) {
+                Text("TEST FINGERSTYLE", color = Color.Black, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+            }
+
+            Button(
+                onClick = { viewModel.feedPerformanceNotes(listOf("F#", "A#", "C#", "F#"), "F# Major") },
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFF9100)),
+                modifier = Modifier.weight(1f)
+            ) {
+                Text("TEST SUNGURA ARPEGGIO", color = Color.Black, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+            }
         }
+
+        InstrumentSynchronizerView(
+            activeNotes = rawNoteNames.ifEmpty { listOf("C", "E", "G") },
+            currentNote = rawNoteNames.lastOrNull()
+        )
+    }
+}
+
+@Composable
+private fun AnalyzerWorkspaceContent(viewModel: WorkstationViewModel) {
+    val currentChordModel by viewModel.currentChord.collectAsStateWithLifecycle()
+    val activeNotes by viewModel.activePerformanceNotes.collectAsStateWithLifecycle()
+    val cleanNotes = activeNotes.map { it.cleanNoteName }
+    val chordName = currentChordModel?.name ?: "C Major"
+
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        LearnAsYouPlayCard(
+            chordSymbol = chordName,
+            rawNotes = cleanNotes
+        )
+
+        ProfessionalVisualAnalyzersCard()
+
+        InstrumentSynchronizerView(
+            activeNotes = cleanNotes.ifEmpty { listOf("C", "E", "G") },
+            currentNote = cleanNotes.lastOrNull()
+        )
+    }
+}
+
+@Composable
+private fun InstrumentVoicingsWorkspaceContent(viewModel: WorkstationViewModel) {
+    val activeNotes by viewModel.activePerformanceNotes.collectAsStateWithLifecycle()
+    val cleanNotes = activeNotes.map { it.cleanNoteName }
+
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        InstrumentSynchronizerView(
+            activeNotes = cleanNotes.ifEmpty { listOf("C", "E", "G", "B") },
+            currentNote = cleanNotes.lastOrNull()
+        )
     }
 }
 
@@ -354,6 +686,9 @@ private fun KeyDetectionWorkspaceContent(viewModel: WorkstationViewModel) {
 
 @Composable
 private fun PhraseRecWorkspaceContent(viewModel: WorkstationViewModel) {
+    val activeNotes by viewModel.activePerformanceNotes.collectAsStateWithLifecycle()
+    val cleanNotes = activeNotes.map { it.cleanNoteName }
+
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Text("MELODIC CONTOUR & ACOUSTIC LICK EXTRACTOR", fontSize = 12.sp, color = Color(0xFF3B82F6), fontWeight = FontWeight.Bold)
         Text("Extracting melodic lines from input audio channel...", fontSize = 11.sp, color = Color(0xFFCBD5E1))
@@ -363,23 +698,47 @@ private fun PhraseRecWorkspaceContent(viewModel: WorkstationViewModel) {
             border = BorderStroke(1.dp, Color(0xFF3B82F6)),
             modifier = Modifier.fillMaxWidth().padding(8.dp)
         ) {
-            Text("Phrase Contour: [ C4 -> E4 -> G4 -> A4 -> G4 -> E4 ]", modifier = Modifier.padding(12.dp), fontSize = 12.sp, color = Color.White, fontWeight = FontWeight.Bold)
+            Text(
+                text = "Phrase Contour: [ ${cleanNotes.ifEmpty { listOf("C4", "E4", "G4", "A4", "G4", "E4") }.joinToString(" -> ")} ]",
+                modifier = Modifier.padding(12.dp),
+                fontSize = 12.sp,
+                color = Color.White,
+                fontWeight = FontWeight.Bold
+            )
         }
     }
 }
 
 @Composable
 private fun AfricanMusicWorkspaceContent(viewModel: WorkstationViewModel) {
-    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        Text("AFRICAN MUSIC INTELLIGENCE ENGINE", fontSize = 12.sp, color = Color(0xFFF59E0B), fontWeight = FontWeight.Bold)
-        Text("Rhythmic Modes: Afrobeat 3:2 Polyrhythm, Soukous Guitarmonies, Amapiano Log-Bass", fontSize = 11.sp, color = Color(0xFFCBD5E1))
-        Button(
-            onClick = { viewModel.engine.tapLiveMusicalNote("A C E G") },
-            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFF59E0B)),
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Text("GENERATE SOUKOUS INTERCEPT LICK", color = Color.Black, fontWeight = FontWeight.Bold)
+    val activeNotes by viewModel.activePerformanceNotes.collectAsStateWithLifecycle()
+    val cleanNotes = activeNotes.map { it.cleanNoteName }
+
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        AfricanMusicIntelligenceCard(cleanNotes = cleanNotes)
+
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(
+                onClick = { viewModel.feedPerformanceNotes(listOf("F#", "B", "C#"), "F# Major") },
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFF59E0B)),
+                modifier = Modifier.weight(1f)
+            ) {
+                Text("SUNGURA GUITAR", color = Color.Black, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+            }
+
+            Button(
+                onClick = { viewModel.feedPerformanceNotes(listOf("C", "F", "G"), "C Major") },
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFD4AF37)),
+                modifier = Modifier.weight(1f)
+            ) {
+                Text("SOUKOUS SEBEN", color = Color.Black, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+            }
         }
+
+        InstrumentSynchronizerView(
+            activeNotes = cleanNotes.ifEmpty { listOf("F#", "B", "C#") },
+            currentNote = cleanNotes.lastOrNull()
+        )
     }
 }
 

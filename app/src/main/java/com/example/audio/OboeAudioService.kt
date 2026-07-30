@@ -128,11 +128,10 @@ class OboeAudioService private constructor() {
 
             var step = 0
             while (isActive && isEngineActive) {
-                // Generate synth test wave / read from shared zero-copy ring buffer
+                // Read from shared zero-copy ring buffer (silence by default when idle)
                 for (i in 0 until frameChunkSize) {
-                    val sample = (Math.sin((step + i) * 0.05) * 8000).toInt().toShort()
-                    pcmData[i * 2] = sample     // L
-                    pcmData[i * 2 + 1] = sample // R
+                    pcmData[i * 2] = 0     // L - silence
+                    pcmData[i * 2 + 1] = 0 // R - silence
                 }
                 step += frameChunkSize
 

@@ -37,4 +37,19 @@ class MusicWorkstationRepository(private val workstationDao: WorkstationDao) {
     suspend fun getGlobalSession(): AppGlobalSessionEntity? = workstationDao.getGlobalSession()
 
     suspend fun saveGlobalSession(session: AppGlobalSessionEntity) = workstationDao.saveGlobalSession(session)
+
+    // Recording Storage and Reuse System Repository
+    val allRecordings: Flow<List<RecordingAssetEntity>> = workstationDao.getAllRecordingsFlow()
+
+    fun searchRecordings(query: String): Flow<List<RecordingAssetEntity>> = workstationDao.searchRecordings(query)
+
+    suspend fun getRecordingById(id: String): RecordingAssetEntity? = workstationDao.getRecordingById(id)
+
+    suspend fun insertRecording(recording: RecordingAssetEntity) = workstationDao.insertRecording(recording)
+
+    suspend fun updateRecording(recording: RecordingAssetEntity) = workstationDao.updateRecording(recording)
+
+    suspend fun deleteRecordingById(id: String) = workstationDao.deleteRecordingById(id)
+
+    suspend fun updateRecordingFavorite(id: String, isFavorite: Boolean) = workstationDao.updateRecordingFavorite(id, isFavorite)
 }

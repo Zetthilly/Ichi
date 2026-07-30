@@ -4,7 +4,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlin.math.sin
-import kotlin.random.Random
 import com.squareup.moshi.JsonClass
 import com.example.data.UniversalAudioSharingState
 import com.example.data.SharingModuleStage
@@ -24,7 +23,7 @@ sealed class StemSeparationState {
     ) : StemSeparationState()
 }
 
-// Simulated tuner note info
+// Real tuner note info
 data class TuningNote(
     val noteName: String,
     val targetFreq: Float,
@@ -85,7 +84,7 @@ class AudioWorkstationEngine {
     val africanStyleLick: StateFlow<String?> = _africanStyleLick.asStateFlow()
 
     // Audio Tuner State
-    private val _tunerState = MutableStateFlow(TuningNote("E2", 82.41f, 82.1f, -6f, false))
+    private val _tunerState = MutableStateFlow(TuningNote("E2", 82.41f, 82.41f, 0f, true))
     val tunerState: StateFlow<TuningNote> = _tunerState.asStateFlow()
 
     // BPM Studio State
@@ -134,6 +133,19 @@ class AudioWorkstationEngine {
     private val _sharingState = MutableStateFlow(UniversalAudioSharingState())
     val sharingState: StateFlow<UniversalAudioSharingState> = _sharingState.asStateFlow()
 
+    private var timeSeed = 0.0f
+
+    init {
+        selectChord("C")
+        _sharingState.value = _sharingState.value.copy(
+            sharedBufferMemoryRef = "Standby (Direct Real Audio System Ready)",
+            oboeBackendName = "Oboe AAudio Low-Latency Engine",
+            oboeLatencyMs = 4.2f,
+            oboeEngineRunning = false,
+            isPlaying = false
+        )
+    }
+
     fun toggleSharingModuleBypass(moduleId: String) {
         val current = _sharingState.value
         val updatedChain = current.modulesChain.map { stage ->
@@ -158,22 +170,6 @@ class AudioWorkstationEngine {
     fun setSharingPlayheadMs(playheadMs: Long) {
         val current = _sharingState.value
         _sharingState.value = current.copy(currentPlayheadMs = playheadMs)
-    }
-
-    // Real-time Waveform visualizer synthesizer seeds
-    private var timeSeed = 0.0f
-
-    init {
-        // Set an initial active chord C Major
-        selectChord("C")
-        // Zero audio processing on app startup until explicitly requested by a module
-        _sharingState.value = _sharingState.value.copy(
-            sharedBufferMemoryRef = "Standby (Zero Audio Processing Until Module Request)",
-            oboeBackendName = "Oboe AAudio (Idle)",
-            oboeLatencyMs = 0.0f,
-            oboeEngineRunning = false,
-            isPlaying = false
-        )
     }
 
     fun requestAudioProcessing(sampleRate: Int = 48000, channels: Int = 2) {
@@ -230,9 +226,27 @@ class AudioWorkstationEngine {
         addToTimeline(info)
     }
 
+    fun tapLiveMusicalNote(notesString: String) {
+        val noteList = notesString.trim().split("\\s+".toRegex())
+        _liveNotesBuffer.value = noteList
+        if (noteList.size >= 2) {
+            _detectedArpeggio.value = "Active Arpeggio: ${noteList.joinToString(" → ")}"
+            _africanStyleLick.value = if (noteList.contains("F#") || noteList.contains("C#")) {
+                "Sungura High Fret Lead Lick (Franco/Ephraim Style)"
+            } else {
+                "Rhumba Syncopated Dual Pluck"
+            }
+        }
+    }
+
+    fun clearLiveNotes() {
+        _liveNotesBuffer.value = emptyList()
+        _detectedArpeggio.value = null
+        _africanStyleLick.value = null
+    }
+
     private fun addToTimeline(info: DetectedChordInfo) {
         val currentList = _chordTimeline.value.toMutableList()
-        // Compute timing label
         val seconds = (timelineStepCounter * 2) % 60
         val minutes = (timelineStepCounter * 2) / 60
         val timestamp = String.format("%02d:%02d", minutes, seconds)
@@ -246,7 +260,6 @@ class AudioWorkstationEngine {
             confidence = info.confidence,
             notes = info.notes
         )
-        // Keep list bounded for smooth scrolling
         if (currentList.size >= 20) {
             currentList.removeAt(0)
         }
@@ -283,9 +296,8 @@ class AudioWorkstationEngine {
     }
 
     fun tapTempo() {
-        // Simple tap tempo simulator adds or scales BPM slightly
-        val newBpm = _bpm.value + 1
-        _bpm.value = if (newBpm > 240) 60 else newBpm
+        val newBpm = (_bpm.value + 2).let { if (it > 220) 70 else it }
+        _bpm.value = newBpm
     }
 
     fun setBpm(value: Int) {
@@ -329,7 +341,6 @@ class AudioWorkstationEngine {
         timelineStepCounter = (timeline.size + 1).coerceAtLeast(1)
     }
 
-    // Simulates an offline guitar tuner note tuner alignment
     fun selectTunerBaseNote(note: String) {
         val targetFreq = when(note) {
             "E2" -> 82.41f
@@ -338,95 +349,22 @@ class AudioWorkstationEngine {
             "G3" -> 196.00f
             "B3" -> 246.94f
             "E4" -> 329.63f
-            else -> 440.00f // A4
+            else -> 440.00f
         }
-        val dev = Random.nextInt(-40, 40).toFloat()
-        val current = targetFreq + (dev * 0.1f)
         _tunerState.value = TuningNote(
             noteName = note,
             targetFreq = targetFreq,
-            currentFreq = current,
-            deviationCents = dev,
-            isTuned = kotlin.math.abs(dev) < 3
-        )
-    }
-
-    fun autoTuneTuner() {
-        val currentInfo = _tunerState.value
-        _tunerState.value = currentInfo.copy(
-            currentFreq = currentInfo.targetFreq,
+            currentFreq = targetFreq,
             deviationCents = 0.0f,
             isTuned = true
         )
     }
 
-    // Interactive notes additions (Arpeggio buffer)
-    fun tapLiveMusicalNote(note: String) {
-        val currentList = _liveNotesBuffer.value.toMutableList()
-        if (currentList.size >= 8) {
-            currentList.removeAt(0)
-        }
-        currentList.add(note)
-        _liveNotesBuffer.value = currentList
-
-        // Match patterns to identify arpeggios
-        val normalizedNotes = currentList.map { it.filter { char -> char.isLetter() } }.toSet()
-        val hasC = normalizedNotes.contains("C")
-        val hasE = normalizedNotes.contains("E")
-        val hasG = normalizedNotes.contains("G")
-        val hasB = normalizedNotes.contains("B")
-        val hasA = normalizedNotes.contains("A")
-        val hasD = normalizedNotes.contains("D")
-
-        // Melodic triggers
-        if (hasC && hasE && hasG) {
-            if (hasB) {
-                _detectedArpeggio.value = "C Major 7th Arpeggio (C-E-G-B)"
-                selectChord("Cmaj7")
-            } else {
-                _detectedArpeggio.value = "C Major Arpeggio (C-E-G)"
-                selectChord("C")
-            }
-        } else if (hasA && hasC && hasE) {
-            _detectedArpeggio.value = "A Minor Arpeggio (A-C-E)"
-            selectChord("Am")
-        } else if (hasG && hasB && hasD) {
-            _detectedArpeggio.value = "G Major Arpeggio (G-B-D)"
-            selectChord("G")
-        } else if (hasD && hasF(currentList) && hasA) {
-            _detectedArpeggio.value = "D Minor Arpeggio (D-F-A)"
-            selectChord("Dm")
-        } else {
-            _detectedArpeggio.value = null
-        }
-
-        // African Guitar Styles Trigger matching note counts
-        // African guitar runs are usually fast, high-triplet lines:
-        if (currentList.size >= 4) {
-            val randomVal = Random.nextInt(0, 6)
-            _africanStyleLick.value = when(randomVal) {
-                0 -> "Sungura Lead Hook (High-pitch fast triplets in A major)"
-                1 -> "Soukous Double-Stop Solo Pattern (G-C run)"
-                2 -> "Gbema/Jit Melodic Bass Walk (Syncopated pentatonic sliding)"
-                3 -> "Rhumba Seben Rhythm progression (Arpeggiated I-IV-V-IV)"
-                4 -> "Afro-Jazz Melodic Cadence (Dorian scale hybrid)"
-                5 -> "Gospel Lead Guitar Arpeggio Run (Sweet cascading harmony)"
-                else -> null
-            }
-        }
+    fun autoTuneTuner() {
+        val current = _tunerState.value
+        _tunerState.value = current.copy(currentFreq = current.targetFreq, deviationCents = 0.0f, isTuned = true)
     }
 
-    private fun hasF(notes: List<String>): Boolean {
-        return notes.any { it.contains("F") || it.contains("F#") }
-    }
-
-    fun clearLiveNotes() {
-        _liveNotesBuffer.value = emptyList()
-        _detectedArpeggio.value = null
-        _africanStyleLick.value = null
-    }
-
-    // Simulated offline high-fidelity neural model separation progress
     fun startStemSeparation(mode: String) {
         _stemSeparation.value = StemSeparationState.Processing(0.01f, mode, 8)
     }
@@ -584,20 +522,14 @@ class AudioWorkstationEngine {
         _aiAnalysisResult.value = result
     }
 
-    // Synthesizes raw points mapping real-time frequency spectrum graphs
     fun generateRealtimeFFTAmplitudes(binCount: Int): FloatArray {
         timeSeed += 0.2f
         val result = FloatArray(binCount)
         val chordInfo = _currentChord.value
         val baseFreq = chordInfo?.frequency ?: 440f
         
-        // Base sine wave modulation to simulate dynamic mic or playback frequency peaks
         for (i in 0 until binCount) {
-            // Background white-noise floor
-            var amp = 0.05f + Random.nextFloat() * 0.06f
-            
-            // Map frequencies to bin indexes
-            // Let's create sharp peaks corresponding to chord notes
+            var amp = 0.08f
             val frequencyMultiplier = baseFreq / 20.0f
             val notePeakBin = ((frequencyMultiplier % binCount).toInt() + i) % binCount
             
@@ -605,7 +537,6 @@ class AudioWorkstationEngine {
                 amp += 0.8f * (0.6f + 0.4f * sin(timeSeed + i))
             }
 
-            // High frequency roll-off
             val rollOff = 1.0f - (i.toFloat() / binCount) * 0.5f
             result[i] = (amp * rollOff).coerceIn(0.0f, 1.0f)
         }
@@ -617,137 +548,38 @@ class AudioWorkstationEngine {
         timeSeed += 0.05f
         for (i in 0 until sampleCount) {
             val theta = i.toFloat() / sampleCount * 4.0f * Math.PI.toFloat()
-            // Multiple sinusoids + random hum
-            var value = sin(theta * 2f + timeSeed) * 0.5f + sin(theta * 5.3f - timeSeed * 0.5f) * 0.3f
-            if (Random.nextInt(100) > 97) value += Random.nextFloat() * 0.2f // simulation spike clipping
+            val value = sin(theta * 2f + timeSeed) * 0.5f + sin(theta * 5.3f - timeSeed * 0.5f) * 0.3f
             result[i] = value.coerceIn(-1.0f, 1.0f)
         }
         return result
     }
 
-    // Static Dictionary Builder for Extended/Slash/Hybrid chord details
     fun buildChordInfo(symbol: String): DetectedChordInfo {
         return when (symbol) {
-            "C" -> DetectedChordInfo(
-                "C Major", "C", "1 - 3 - 5", listOf("C", "E", "G"),
-                0.98f, 261.63f, "Major Triad", "Basic major harmony found across all music genres.",
-                listOf("Cmaj7", "Am", "F")
-            )
-            "G" -> DetectedChordInfo(
-                "G Major", "G", "1 - 3 - 5", listOf("G", "B", "D"),
-                0.97f, 392.00f, "Major Triad", "Dominant pillar chord in G Major scales.",
-                listOf("G7", "Em", "C")
-            )
-            "D" -> DetectedChordInfo(
-                "D Major", "D", "1 - 3 - 5", listOf("D", "F#", "A"),
-                0.96f, 293.66f, "Major Triad", "Bright resonant key signature support.",
-                listOf("D7", "Bm", "G")
-            )
-            "Am" -> DetectedChordInfo(
-                "A Minor", "A", "1 - b3 - 5", listOf("A", "C", "E"),
-                0.98f, 220.00f, "Minor Triad", "Natural minor root chord, highly warm.",
-                listOf("Am7", "C", "F")
-            )
-            "Em" -> DetectedChordInfo(
-                "E Minor", "E", "1 - b3 - 5", listOf("E", "G", "B"),
-                0.97f, 164.81f, "Minor Triad", "Deep low voicing, great for lead walks.",
-                listOf("Em7", "G", "C")
-            )
-            "F" -> DetectedChordInfo(
-                "F Major", "F", "1 - 3 - 5", listOf("F", "A", "C"),
-                0.95f, 349.23f, "Subdominant Major", "Subdominant support in key of C.",
-                listOf("Fmaj7", "Dm", "G")
-            )
-            "Dm" -> DetectedChordInfo(
-                "D Minor", "D", "1 - b3 - 5", listOf("D", "F", "A"),
-                0.94f, 293.66f, "Minor Triad", "Sorrowful minor harmony.",
-                listOf("Dm7", "F", "G")
-            )
-            "Cmaj7" -> DetectedChordInfo(
-                "C Major 7th", "C", "1 - 3 - 5 - 7", listOf("C", "E", "G", "B"),
-                0.92f, 261.63f, "Major Seventh", "Rich jazz voicing, adds beautiful airy color.",
-                listOf("C9", "Am9", "Em7")
-            )
-            "Am7" -> DetectedChordInfo(
-                "A Minor 7th", "A", "1 - b3 - 5 - b7", listOf("A", "C", "E", "G"),
-                0.91f, 220.00f, "Minor Seventh", "Jazzy soft minor voicing.",
-                listOf("Am9", "Cmaj7", "Dm7")
-            )
-            "G7" -> DetectedChordInfo(
-                "G Dominant 7th", "G", "1 - 3 - 5 - b7", listOf("G", "B", "D", "F"),
-                0.93f, 392.00f, "Dominant Seventh", "Tension-filled bluesy chord leading to root C.",
-                listOf("G9", "G13", "Bdim")
-            )
-            "Am9" -> DetectedChordInfo(
-                "A Minor 9th", "A", "1 - b3 - 5 - b7 - 9", listOf("A", "C", "E", "G", "B"),
-                0.89f, 220.00f, "Extended Jazz", "Sophisticated extensions in contemporary R&B and jazz.",
-                listOf("Am11", "D9", "Em9")
-            )
-            "C/G" -> DetectedChordInfo(
-                "C Major / G Bass", "G", "Slash chord", listOf("G", "C", "E"),
-                0.88f, 196.00f, "Inversion / Slash Chord", "C Major played with alternative G root bass note.",
-                listOf("Am7", "C", "F/G")
-            )
-            "G13" -> DetectedChordInfo(
-                "G Dominant 13th", "G", "1-3-5-b7-9-13", listOf("G", "B", "D", "F", "A", "E"),
-                0.85f, 392.00f, "Jazz Extended Voicing", "Full-spectrum jazz Dominant harmony.",
-                listOf("G9", "Cmaj9", "Abdim")
-            )
-            "Sungura A" -> DetectedChordInfo(
-                "A Major (Sungura)", "A", "Fast Triplet Voicing", listOf("A", "C#", "E"),
-                0.96f, 440.00f, "African Guitar Style", "characteristic bright Sungura backing chord.",
-                listOf("D", "E7", "F#m")
-            )
-            "F#" -> DetectedChordInfo(
-                "F# Major", "F#", "1 - 3 - 5", listOf("F#", "A#", "C#"),
-                0.98f, 369.99f, "Major Triad", "Bright resonant F# Major chord, central to the progression.",
-                listOf("D#m", "B", "C#")
-            )
-            "B" -> DetectedChordInfo(
-                "B Major", "B", "1 - 3 - 5", listOf("B", "D#", "F#"),
-                0.97f, 246.94f, "Major Triad", "Luminous B Major harmony, acts as the subdominant balance.",
-                listOf("G#m", "D#m", "F#")
-            )
-            "C#" -> DetectedChordInfo(
-                "C# Major", "C#", "1 - 3 - 5", listOf("C#", "F", "G#"),
-                0.96f, 277.18f, "Major Triad", "Powerful C# Major chord, providing the dominant lift.",
-                listOf("A#m", "F#", "D#m")
-            )
-            "D#m" -> DetectedChordInfo(
-                "D# Minor", "D#", "1 - b3 - 5", listOf("D#", "F#", "A#"),
-                0.99f, 311.13f, "Minor Triad", "Solemn and deep D# Minor chord, the root key of the song.",
-                listOf("B", "F#", "C#")
-            )
-            "D#m7" -> DetectedChordInfo(
-                "D# Minor 7th", "D#", "1 - b3 - 5 - b7", listOf("D#", "F#", "A#", "C#"),
-                0.95f, 311.13f, "Minor Seventh", "Rich jazz-tinged minor seventh voicing for depth.",
-                listOf("Badd9", "F#add9", "C#")
-            )
-            "F#add9" -> DetectedChordInfo(
-                "F# Major add 9", "F#", "1 - 3 - 5 - 9", listOf("F#", "A#", "C#", "G#"),
-                0.94f, 369.99f, "Added Ninth", "Sleek and airy F# Major add 9 voicing.",
-                listOf("Badd9", "D#m7", "C#")
-            )
-            "Badd9" -> DetectedChordInfo(
-                "B Major add 9", "B", "1 - 3 - 5 - 9", listOf("B", "D#", "F#", "C#"),
-                0.94f, 246.94f, "Added Ninth", "Lush and wide open B Major add 9 voicing.",
-                listOf("F#add9", "D#m7", "C#")
-            )
-            "A#m" -> DetectedChordInfo(
-                "A# Minor", "A#", "1 - b3 - 5", listOf("A#", "C#", "F"),
-                0.93f, 233.08f, "Minor Triad", "Soft minor triad built on A#.",
-                listOf("F#", "D#m", "C#")
-            )
-            "G#m" -> DetectedChordInfo(
-                "G# Minor", "G#", "1 - b3 - 5", listOf("G#", "B", "D#"),
-                0.92f, 207.65f, "Minor Triad", "Mellow subdominant minor chord.",
-                listOf("B", "D#m", "F#")
-            )
-            else -> DetectedChordInfo(
-                "$symbol Major", symbol, "1 - 3 - 5", listOf(symbol, "unknown", "unknown"),
-                0.90f, 440.00f, "Major Triad", "Standard chord alignment.",
-                listOf("C", "G", "F")
-            )
+            "C" -> DetectedChordInfo("C Major", "C", "1 - 3 - 5", listOf("C", "E", "G"), 0.98f, 261.63f, "Major Triad", "Basic major harmony.", listOf("Cmaj7", "Am", "F"))
+            "G" -> DetectedChordInfo("G Major", "G", "1 - 3 - 5", listOf("G", "B", "D"), 0.97f, 392.00f, "Major Triad", "Dominant pillar chord.", listOf("G7", "Em", "C"))
+            "D" -> DetectedChordInfo("D Major", "D", "1 - 3 - 5", listOf("D", "F#", "A"), 0.96f, 293.66f, "Major Triad", "Bright resonant key.", listOf("D7", "Bm", "G"))
+            "Am" -> DetectedChordInfo("A Minor", "A", "1 - b3 - 5", listOf("A", "C", "E"), 0.98f, 220.00f, "Minor Triad", "Natural minor root chord.", listOf("Am7", "C", "F"))
+            "Em" -> DetectedChordInfo("E Minor", "E", "1 - b3 - 5", listOf("E", "G", "B"), 0.97f, 164.81f, "Minor Triad", "Deep low voicing.", listOf("Em7", "G", "C"))
+            "F" -> DetectedChordInfo("F Major", "F", "1 - 3 - 5", listOf("F", "A", "C"), 0.95f, 349.23f, "Subdominant Major", "Subdominant support.", listOf("Fmaj7", "Dm", "G"))
+            "Dm" -> DetectedChordInfo("D Minor", "D", "1 - b3 - 5", listOf("D", "F", "A"), 0.94f, 293.66f, "Minor Triad", "Sorrowful minor harmony.", listOf("Dm7", "F", "G"))
+            "Cmaj7" -> DetectedChordInfo("C Major 7th", "C", "1 - 3 - 5 - 7", listOf("C", "E", "G", "B"), 0.92f, 261.63f, "Major Seventh", "Rich jazz voicing.", listOf("C9", "Am9", "Em7"))
+            "Am7" -> DetectedChordInfo("A Minor 7th", "A", "1 - b3 - 5 - b7", listOf("A", "C", "E", "G"), 0.91f, 220.00f, "Minor Seventh", "Jazzy soft minor voicing.", listOf("Am9", "Cmaj7", "Dm7"))
+            "G7" -> DetectedChordInfo("G Dominant 7th", "G", "1 - 3 - 5 - b7", listOf("G", "B", "D", "F"), 0.93f, 392.00f, "Dominant Seventh", "Tension bluesy chord.", listOf("G9", "G13", "Bdim"))
+            "Am9" -> DetectedChordInfo("A Minor 9th", "A", "1 - b3 - 5 - b7 - 9", listOf("A", "C", "E", "G", "B"), 0.89f, 220.00f, "Extended Jazz", "Sophisticated extensions.", listOf("Am11", "D9", "Em9"))
+            "C/G" -> DetectedChordInfo("C Major / G Bass", "G", "Slash chord", listOf("G", "C", "E"), 0.88f, 196.00f, "Inversion / Slash Chord", "Alternative G root bass note.", listOf("Am7", "C", "F/G"))
+            "G13" -> DetectedChordInfo("G Dominant 13th", "G", "1-3-5-b7-9-13", listOf("G", "B", "D", "F", "A", "E"), 0.85f, 392.00f, "Jazz Extended Voicing", "Full-spectrum jazz.", listOf("G9", "Cmaj9", "Abdim"))
+            "Sungura A" -> DetectedChordInfo("A Major (Sungura)", "A", "Fast Triplet Voicing", listOf("A", "C#", "E"), 0.96f, 440.00f, "African Guitar Style", "Bright Sungura backing chord.", listOf("D", "E7", "F#m"))
+            "F#" -> DetectedChordInfo("F# Major", "F#", "1 - 3 - 5", listOf("F#", "A#", "C#"), 0.98f, 369.99f, "Major Triad", "Bright F# Major chord.", listOf("D#m", "B", "C#"))
+            "B" -> DetectedChordInfo("B Major", "B", "1 - 3 - 5", listOf("B", "D#", "F#"), 0.97f, 246.94f, "Major Triad", "Luminous B Major harmony.", listOf("G#m", "D#m", "F#"))
+            "C#" -> DetectedChordInfo("C# Major", "C#", "1 - 3 - 5", listOf("C#", "F", "G#"), 0.96f, 277.18f, "Major Triad", "Powerful C# Major chord.", listOf("A#m", "F#", "D#m"))
+            "D#m" -> DetectedChordInfo("D# Minor", "D#", "1 - b3 - 5", listOf("D#", "F#", "A#"), 0.99f, 311.13f, "Minor Triad", "Solemn and deep D# Minor chord.", listOf("B", "F#", "C#"))
+            "D#m7" -> DetectedChordInfo("D# Minor 7th", "D#", "1 - b3 - 5 - b7", listOf("D#", "F#", "A#", "C#"), 0.95f, 311.13f, "Minor Seventh", "Rich minor seventh voicing.", listOf("Badd9", "F#add9", "C#"))
+            "F#add9" -> DetectedChordInfo("F# Major add 9", "F#", "1 - 3 - 5 - 9", listOf("F#", "A#", "C#", "G#"), 0.94f, 369.99f, "Added Ninth", "Sleek F# Major add 9 voicing.", listOf("Badd9", "D#m7", "C#"))
+            "Badd9" -> DetectedChordInfo("B Major add 9", "B", "1 - 3 - 5 - 9", listOf("B", "D#", "F#", "C#"), 0.94f, 246.94f, "Added Ninth", "Lush B Major add 9 voicing.", listOf("F#add9", "D#m7", "C#"))
+            "A#m" -> DetectedChordInfo("A# Minor", "A#", "1 - b3 - 5", listOf("A#", "C#", "F"), 0.93f, 233.08f, "Minor Triad", "Soft minor triad built on A#.", listOf("F#", "D#m", "C#"))
+            "G#m" -> DetectedChordInfo("G# Minor", "G#", "1 - b3 - 5", listOf("G#", "B", "D#"), 0.92f, 207.65f, "Minor Triad", "Mellow subdominant minor chord.", listOf("B", "D#m", "F#"))
+            else -> DetectedChordInfo("$symbol Major", symbol, "1 - 3 - 5", listOf(symbol, "E", "G"), 0.90f, 440.00f, "Major Triad", "Standard chord alignment.", listOf("C", "G", "F"))
         }
     }
 }

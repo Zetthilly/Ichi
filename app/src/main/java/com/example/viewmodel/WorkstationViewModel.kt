@@ -18,6 +18,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import java.io.File
@@ -40,8 +41,17 @@ class WorkstationViewModel(application: Application) : AndroidViewModel(applicat
 
     private val database = AppDatabase.getDatabase(application)
     private val repository = MusicWorkstationRepository(database.workstationDao())
+    val masterAudioEngine = com.example.audio.MasterAudioEngine(application)
     val engine = AudioWorkstationEngine()
     private val sharedPrefs = application.getSharedPreferences("hz_audio_workstation_prefs", android.content.Context.MODE_PRIVATE)
+
+    // Master Audio Engine Real Flow Proxies
+    val masterIsPlaying: StateFlow<Boolean> = masterAudioEngine.isPlaying
+    val masterCurrentPositionMs: StateFlow<Long> = masterAudioEngine.currentPositionMs
+    val masterDurationMs: StateFlow<Long> = masterAudioEngine.durationMs
+    val masterSpeedMultiplier: StateFlow<Float> = masterAudioEngine.speedMultiplier
+    val masterPitchShiftSemitones: StateFlow<Int> = masterAudioEngine.pitchShiftSemitones
+    val masterErrorMessage: StateFlow<String?> = masterAudioEngine.errorMessage
 
     // Jetpack DataStore Repository for User Preferences & Module States
     val userPreferencesRepository = UserPreferencesRepository(application)
@@ -69,6 +79,23 @@ class WorkstationViewModel(application: Application) : AndroidViewModel(applicat
             started = SharingStarted.WhileSubscribed(5000),
             initialValue = emptyList()
         )
+
+    // Professional Recording Storage and Reuse System™ State
+    val allRecordings: StateFlow<List<RecordingAssetEntity>> = repository.allRecordings
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(5000),
+            initialValue = emptyList()
+        )
+
+    private val _recordingSearchQuery = MutableStateFlow("")
+    val recordingSearchQuery: StateFlow<String> = _recordingSearchQuery.asStateFlow()
+
+    private val _recordingSortOrder = MutableStateFlow("DATE_DESC")
+    val recordingSortOrder: StateFlow<String> = _recordingSortOrder.asStateFlow()
+
+    private val _recordingFavoriteFilter = MutableStateFlow(false)
+    val recordingFavoriteFilter: StateFlow<Boolean> = _recordingFavoriteFilter.asStateFlow()
 
     // Active View States (Home, Analyzer, Studio, Library, Settings)
     private val _currentSection = MutableStateFlow("Home")
@@ -117,11 +144,21 @@ class WorkstationViewModel(application: Application) : AndroidViewModel(applicat
     private val _activePerformanceNotes = MutableStateFlow<List<DetectedPerformanceNote>>(emptyList())
     val activePerformanceNotes: StateFlow<List<DetectedPerformanceNote>> = _activePerformanceNotes.asStateFlow()
 
+    fun closeProject() {
+        masterAudioEngine.clearProjectResources()
+        _activePerformanceNotes.value = emptyList()
+        _performanceNoteStream.value = emptyList()
+        _globalKeySignature.value = null
+    }
+
     fun toggleHarmonicClassification() {
         val next = !_showHarmonicClassification.value
         _showHarmonicClassification.value = next
         sharedPrefs.edit().putBoolean("show_harmonic_classification", next).apply()
     }
+
+    // Arpeggio Intelligence Engine instance
+    val arpeggioIntelligenceEngine = com.example.audio.ArpeggioIntelligenceEngine(repository = repository, scope = viewModelScope)
 
     fun feedPerformanceNotes(rawNotes: List<String>, parentChord: String = currentChord.value?.name ?: "C") {
         if (rawNotes.isEmpty()) return
@@ -138,7 +175,14 @@ class WorkstationViewModel(application: Application) : AndroidViewModel(applicat
         val updatedStream = (_performanceNoteStream.value + classified).takeLast(40)
         _performanceNoteStream.value = updatedStream
 
-        // Pass raw notes to engine buffer without filtering
+        // Pass raw notes to Arpeggio Intelligence Engine to analyze & store in Room DB
+        arpeggioIntelligenceEngine.processNoteStream(
+            rawNotes = rawNotes,
+            bpm = bpm.value,
+            autoSaveToRoom = true
+        )
+
+        // Pass raw notes to audio engine buffer without filtering
         val notesString = rawNotes.joinToString(" ")
         engine.tapLiveMusicalNote(notesString)
     }
@@ -282,6 +326,14 @@ class WorkstationViewModel(application: Application) : AndroidViewModel(applicat
     fun importUniversalAudio(metadata: com.example.data.ImportedAudioMetadata) {
         _lastImportedAudioMetadata.value = metadata
         setUploadedFile(metadata.fileName, metadata.fileSize)
+        if (!metadata.uriString.isNullOrBlank()) {
+            try {
+                val uri = android.net.Uri.parse(metadata.uriString)
+                masterAudioEngine.loadAudioUri(uri, metadata)
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
         val titleClean = metadata.fileName.substringBeforeLast(".")
         addSession(
             title = "Project: $titleClean",
@@ -489,6 +541,20 @@ class WorkstationViewModel(application: Application) : AndroidViewModel(applicat
         initialValue = emptyList()
     )
 
+    private val _syncedLyrics = MutableStateFlow(
+        listOf(
+            SyncedLyricLine(0L, 3000L, "♪ (Acoustic Guitar & Piano Intro) ♪", "C  -  G"),
+            SyncedLyricLine(3000L, 6000L, "Walking through the valley in the morning light", "Am  -  F"),
+            SyncedLyricLine(6000L, 9000L, "Searching for the harmony to make things right", "C  -  G7"),
+            SyncedLyricLine(9000L, 12000L, "Singing high above the hills, hear the rhythm call", "Cmaj7  -  Am7"),
+            SyncedLyricLine(12000L, 15000L, "Golden African grooves echo through the hall", "F  -  G13"),
+            SyncedLyricLine(15000L, 18000L, "Feel the bassline drop into the solo space", "Am7  -  Dm7"),
+            SyncedLyricLine(18000L, 21000L, "Every string resonating in its rightful place", "G13  -  Cmaj7"),
+            SyncedLyricLine(21000L, 24000L, "♪ Fade out with gentle chords into the night ♪", "Sungura A  -  C")
+        )
+    )
+    val syncedLyrics: StateFlow<List<SyncedLyricLine>> = _syncedLyrics.asStateFlow()
+
     val transposedSyncedLyrics: StateFlow<List<SyncedLyricLine>> = combine(
         _syncedLyrics,
         _pitchShiftSemitones
@@ -497,7 +563,7 @@ class WorkstationViewModel(application: Application) : AndroidViewModel(applicat
             lyrics
         } else {
             lyrics.map { line ->
-                line.copy(chords = com.example.data.MusicTheoryUtils.transposeLyricChords(line.chords, shift))
+                line.copy(chordsAbove = com.example.data.MusicTheoryUtils.transposeLyricChords(line.chordsAbove, shift))
             }
         }
     }.stateIn(
@@ -528,20 +594,6 @@ class WorkstationViewModel(application: Application) : AndroidViewModel(applicat
 
     private val _currentSongSection = MutableStateFlow<SongSectionInfo?>(_songSections.value.first())
     val currentSongSection: StateFlow<SongSectionInfo?> = _currentSongSection.asStateFlow()
-
-    private val _syncedLyrics = MutableStateFlow(
-        listOf(
-            SyncedLyricLine(0L, 3000L, "♪ (Acoustic Guitar & Piano Intro) ♪", "C  -  G"),
-            SyncedLyricLine(3000L, 6000L, "Walking through the valley in the morning light", "Am  -  F"),
-            SyncedLyricLine(6000L, 9000L, "Searching for the harmony to make things right", "C  -  G7"),
-            SyncedLyricLine(9000L, 12000L, "Singing high above the hills, hear the rhythm call", "Cmaj7  -  Am7"),
-            SyncedLyricLine(12000L, 15000L, "Golden African grooves echo through the hall", "F  -  G13"),
-            SyncedLyricLine(15000L, 18000L, "Feel the bassline drop into the solo space", "Am7  -  Dm7"),
-            SyncedLyricLine(18000L, 21000L, "Every string resonating in its rightful place", "G13  -  Cmaj7"),
-            SyncedLyricLine(21000L, 24000L, "♪ Fade out with gentle chords into the night ♪", "Sungura A  -  C")
-        )
-    )
-    val syncedLyrics: StateFlow<List<SyncedLyricLine>> = _syncedLyrics.asStateFlow()
 
     private val _activeLyricIndex = MutableStateFlow(0)
     val activeLyricIndex: StateFlow<Int> = _activeLyricIndex.asStateFlow()
@@ -616,7 +668,11 @@ class WorkstationViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     fun toggleMasterPlayback() {
-        engine.toggleStemPlayback()
+        if (masterAudioEngine.loadedMetadata.value != null) {
+            masterAudioEngine.togglePlayPause()
+        } else {
+            masterAudioEngine.play() // Triggers "No audio loaded. Import an audio file first." message
+        }
     }
 
     fun setPlaybackPosition(ms: Long) {
@@ -1199,6 +1255,138 @@ class WorkstationViewModel(application: Application) : AndroidViewModel(applicat
             saveCurrentModuleStateImmediately()
             _currentSection.value = section
             restoreModuleState(section)
+        }
+    }
+
+    // Professional Recording Storage and Reuse System™ Actions
+    fun toggleRecording() {
+        engine.toggleRecording()
+    }
+
+    fun setRecordingSearchQuery(query: String) {
+        _recordingSearchQuery.value = query
+    }
+
+    fun setRecordingSortOrder(order: String) {
+        _recordingSortOrder.value = order
+    }
+
+    fun toggleRecordingFavoriteFilter() {
+        _recordingFavoriteFilter.value = !_recordingFavoriteFilter.value
+    }
+
+    fun saveNewRecordingAsset(
+        name: String,
+        pcmSamples: FloatArray,
+        sampleRate: Int = 44100,
+        channels: Int = 1,
+        format: String = "WAV",
+        notes: String? = null
+    ) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val asset = RecordingStorageManager.savePcmToWavAsset(
+                context = getApplication(),
+                recordingName = name,
+                pcmSamples = pcmSamples,
+                sampleRate = sampleRate,
+                channels = channels,
+                format = format,
+                userNotes = notes,
+                detectedBpm = bpm.value,
+                detectedKey = globalKeySignature.value ?: "C Major",
+                detectedChordsCsv = currentChord.value?.name ?: "C, G, Am, F",
+                detectedArpeggio = detectedArpeggio.value,
+                africanStyleLick = africanStyleLick.value
+            )
+            repository.insertRecording(asset)
+        }
+    }
+
+    fun renameRecordingAsset(id: String, newName: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val rec = repository.getRecordingById(id)
+            if (rec != null) {
+                repository.updateRecording(rec.copy(recordingName = newName))
+            }
+        }
+    }
+
+    fun updateRecordingNotes(id: String, newNotes: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val rec = repository.getRecordingById(id)
+            if (rec != null) {
+                repository.updateRecording(rec.copy(userNotes = newNotes))
+            }
+        }
+    }
+
+    fun toggleRecordingFavorite(id: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val rec = repository.getRecordingById(id)
+            if (rec != null) {
+                repository.updateRecordingFavorite(id, !rec.isFavorite)
+            }
+        }
+    }
+
+    fun deleteRecordingAsset(id: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            repository.deleteRecordingById(id)
+        }
+    }
+
+    fun duplicateRecordingAsset(recording: RecordingAssetEntity) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val copy = RecordingStorageManager.duplicateAsset(getApplication(), recording)
+            repository.insertRecording(copy)
+        }
+    }
+
+    fun applyEditToRecording(recording: RecordingAssetEntity, editType: String, param1: Long = 0L, param2: Long = 0L) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val edited = when (editType) {
+                "TRIM" -> RecordingStorageManager.trimAudio(getApplication(), recording, param1, param2)
+                "FADE" -> RecordingStorageManager.fadeInOutAudio(getApplication(), recording, param1, param2)
+                "NORMALIZE" -> RecordingStorageManager.normalizeVolume(getApplication(), recording)
+                "DENOISE" -> RecordingStorageManager.applyNoiseReduction(getApplication(), recording)
+                else -> recording
+            }
+            repository.insertRecording(edited)
+        }
+    }
+
+    fun sendRecordingToModule(recording: RecordingAssetEntity, targetModuleId: String) {
+        viewModelScope.launch {
+            val meta = ImportedAudioMetadata(
+                uriString = android.net.Uri.fromFile(java.io.File(recording.filePath)).toString(),
+                fileName = recording.recordingName + "." + recording.fileFormat.lowercase(),
+                artist = "HZ Mic Recording",
+                album = recording.projectName ?: "Recording Assets",
+                durationMs = recording.durationMs,
+                durationFormatted = recording.getFormattedDuration(),
+                bitrateKbps = "${recording.bitDepth * recording.sampleRate * recording.channels / 1000} kbps",
+                sampleRateHz = "${recording.sampleRate / 1000.0} kHz",
+                channels = if (recording.channels == 2) "Stereo (2 ch)" else "Mono (1 ch)",
+                fileSize = recording.getFormattedSize(),
+                formatExtension = recording.fileFormat,
+                sourceType = "Local Recording Storage",
+                waveformAmplitudes = recording.getWaveformPeaksList(),
+                detectedBpm = recording.detectedBpm,
+                detectedKey = recording.detectedKey
+            )
+
+            importUniversalAudio(meta)
+
+            engine.setBpm(recording.detectedBpm)
+            _globalKeySignature.value = recording.detectedKey
+            if (recording.detectedChordsCsv.isNotBlank()) {
+                val chords = recording.detectedChordsCsv.split(",")
+                if (chords.isNotEmpty()) {
+                    engine.selectChord(chords[0].trim())
+                }
+            }
+
+            setSection(targetModuleId)
         }
     }
 
