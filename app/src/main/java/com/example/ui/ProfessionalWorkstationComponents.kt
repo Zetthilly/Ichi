@@ -1,6 +1,7 @@
 package com.example.ui
 
 import androidx.compose.animation.*
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -207,21 +208,30 @@ fun SynchronizedPianoKeyboard(activeNotes: List<String>, currentNote: String?) {
     ) {
         Row(modifier = Modifier.fillMaxSize()) {
             whiteKeys.forEach { note ->
+                val isOctave5 = note.endsWith("2")
                 val clean = note.removeSuffix("2")
-                val isCurrent = currentNote != null && (clean == currentNote || note == currentNote)
-                val isActive = activeNotes.contains(clean) || activeNotes.contains(note)
+                val targetOctave = if (isOctave5) 5 else 4
 
-                val keyColor = when {
+                val isCurrent = currentNote != null && matchesPianoKey(currentNote, clean, targetOctave, isOctave5)
+                val isActive = activeNotes.any { matchesPianoKey(it, clean, targetOctave, isOctave5) }
+
+                val targetKeyColor = when {
                     isCurrent -> orange
                     isActive -> Color(0xFFFEF08A)
                     else -> Color(0xFFE2E8F0)
                 }
 
+                val animatedKeyColor by animateColorAsState(
+                    targetValue = targetKeyColor,
+                    animationSpec = tween(durationMillis = 200),
+                    label = "piano_white_key"
+                )
+
                 Box(
                     modifier = Modifier
                         .weight(1f)
                         .fillMaxHeight()
-                        .background(keyColor, RoundedCornerShape(bottomStart = 3.dp, bottomEnd = 3.dp))
+                        .background(animatedKeyColor, RoundedCornerShape(bottomStart = 3.dp, bottomEnd = 3.dp))
                         .border(0.5.dp, Color(0xFF0F172A), RoundedCornerShape(bottomStart = 3.dp, bottomEnd = 3.dp)),
                     contentAlignment = Alignment.BottomCenter
                 ) {
@@ -243,15 +253,24 @@ fun SynchronizedPianoKeyboard(activeNotes: List<String>, currentNote: String?) {
             for (pair in blackKeys) {
                 val note = pair.first
                 val pos = pair.second
+                val isOctave5 = note.endsWith("2")
                 val clean = note.removeSuffix("2")
-                val isCurrent = currentNote != null && (clean == currentNote || note == currentNote)
-                val isActive = activeNotes.contains(clean) || activeNotes.contains(note)
+                val targetOctave = if (isOctave5) 5 else 4
 
-                val keyColor = when {
+                val isCurrent = currentNote != null && matchesPianoKey(currentNote, clean, targetOctave, isOctave5)
+                val isActive = activeNotes.any { matchesPianoKey(it, clean, targetOctave, isOctave5) }
+
+                val targetKeyColor = when {
                     isCurrent -> orange
                     isActive -> Color(0xFFFDE047)
                     else -> Color(0xFF1E293B)
                 }
+
+                val animatedKeyColor by animateColorAsState(
+                    targetValue = targetKeyColor,
+                    animationSpec = tween(durationMillis = 200),
+                    label = "piano_black_key"
+                )
 
                 val offset = keyWidth * pos - (keyWidth * 0.35f)
 
@@ -260,7 +279,7 @@ fun SynchronizedPianoKeyboard(activeNotes: List<String>, currentNote: String?) {
                         .offset(x = offset)
                         .width(keyWidth * 0.7f)
                         .height(54.dp)
-                        .background(keyColor, RoundedCornerShape(bottomStart = 2.dp, bottomEnd = 2.dp))
+                        .background(animatedKeyColor, RoundedCornerShape(bottomStart = 2.dp, bottomEnd = 2.dp))
                         .border(0.5.dp, Color.Black, RoundedCornerShape(bottomStart = 2.dp, bottomEnd = 2.dp))
                 )
             }
@@ -297,15 +316,22 @@ fun SynchronizedGuitarFretboard(activeNotes: List<String>, currentNote: String?)
 
                 Row(modifier = Modifier.weight(1f)) {
                     for (fret in 0..frets) {
-                        val noteAtFret = getGuitarNoteAt(stringNote, fret)
-                        val isCurrent = currentNote != null && noteAtFret == currentNote
-                        val isActive = activeNotes.contains(noteAtFret)
+                        val noteAtFretWithOctave = getGuitarNoteAt(stringNote, fret)
+                        val cleanNoteName = noteAtFretWithOctave.takeWhile { it.isLetter() || it == '#' || it == 'b' }
+                        val isCurrent = currentNote != null && matchesNoteOrPitch(currentNote, noteAtFretWithOctave)
+                        val isActive = activeNotes.any { matchesNoteOrPitch(it, noteAtFretWithOctave) }
 
-                        val dotColor = when {
+                        val targetDotColor = when {
                             isCurrent -> orange
                             isActive -> Color(0xFFFEF08A)
                             else -> Color.Transparent
                         }
+
+                        val animatedDotColor by animateColorAsState(
+                            targetValue = targetDotColor,
+                            animationSpec = tween(durationMillis = 200),
+                            label = "guitar_fret_dot"
+                        )
 
                         Box(
                             modifier = Modifier
@@ -315,15 +341,15 @@ fun SynchronizedGuitarFretboard(activeNotes: List<String>, currentNote: String?)
                                 .border(0.5.dp, Color(0xFF78350F)),
                             contentAlignment = Alignment.Center
                         ) {
-                            if (dotColor != Color.Transparent) {
+                            if (animatedDotColor != Color.Transparent) {
                                 Box(
                                     modifier = Modifier
                                         .size(12.dp)
-                                        .background(dotColor, CircleShape),
+                                        .background(animatedDotColor, CircleShape),
                                     contentAlignment = Alignment.Center
                                 ) {
                                     Text(
-                                        text = noteAtFret.take(2),
+                                        text = cleanNoteName,
                                         fontSize = 7.sp,
                                         fontWeight = FontWeight.Black,
                                         color = Color.Black
@@ -367,15 +393,22 @@ fun SynchronizedBassFretboard(activeNotes: List<String>, currentNote: String?) {
 
                 Row(modifier = Modifier.weight(1f)) {
                     for (fret in 0..frets) {
-                        val noteAtFret = getGuitarNoteAt(stringNote, fret)
-                        val isCurrent = currentNote != null && noteAtFret == currentNote
-                        val isActive = activeNotes.contains(noteAtFret)
+                        val noteAtFretWithOctave = getGuitarNoteAt(stringNote, fret)
+                        val cleanNoteName = noteAtFretWithOctave.takeWhile { it.isLetter() || it == '#' || it == 'b' }
+                        val isCurrent = currentNote != null && matchesNoteOrPitch(currentNote, noteAtFretWithOctave)
+                        val isActive = activeNotes.any { matchesNoteOrPitch(it, noteAtFretWithOctave) }
 
-                        val dotColor = when {
+                        val targetDotColor = when {
                             isCurrent -> orange
                             isActive -> Color(0xFF6EE7B7)
                             else -> Color.Transparent
                         }
+
+                        val animatedDotColor by animateColorAsState(
+                            targetValue = targetDotColor,
+                            animationSpec = tween(durationMillis = 200),
+                            label = "bass_fret_dot"
+                        )
 
                         Box(
                             modifier = Modifier
@@ -385,15 +418,15 @@ fun SynchronizedBassFretboard(activeNotes: List<String>, currentNote: String?) {
                                 .border(0.5.dp, Color(0xFF1E293B)),
                             contentAlignment = Alignment.Center
                         ) {
-                            if (dotColor != Color.Transparent) {
+                            if (animatedDotColor != Color.Transparent) {
                                 Box(
                                     modifier = Modifier
                                         .size(14.dp)
-                                        .background(dotColor, CircleShape),
+                                        .background(animatedDotColor, CircleShape),
                                     contentAlignment = Alignment.Center
                                 ) {
                                     Text(
-                                        text = noteAtFret.take(2),
+                                        text = cleanNoteName,
                                         fontSize = 7.sp,
                                         fontWeight = FontWeight.Black,
                                         color = Color.Black
@@ -408,13 +441,46 @@ fun SynchronizedBassFretboard(activeNotes: List<String>, currentNote: String?) {
     }
 }
 
+private fun matchesPianoKey(input: String, baseNote: String, targetOctave: Int, isOctave5Key: Boolean): Boolean {
+    val cleanInput = input.takeWhile { it.isLetter() || it == '#' || it == 'b' }
+    val octaveInInput = input.filter { it.isDigit() }.toIntOrNull()
+
+    if (cleanInput != baseNote) return false
+
+    return if (octaveInInput != null) {
+        octaveInInput == targetOctave || (octaveInInput > 4 && isOctave5Key) || (octaveInInput <= 4 && !isOctave5Key)
+    } else {
+        if (input.endsWith("2")) isOctave5Key else !isOctave5Key
+    }
+}
+
+private fun matchesNoteOrPitch(input: String, fretNoteWithOctave: String): Boolean {
+    if (input == fretNoteWithOctave) return true
+    val cleanInput = input.takeWhile { it.isLetter() || it == '#' || it == 'b' }
+    val cleanFret = fretNoteWithOctave.takeWhile { it.isLetter() || it == '#' || it == 'b' }
+
+    val inputOctave = input.filter { it.isDigit() }.toIntOrNull()
+    val fretOctave = fretNoteWithOctave.filter { it.isDigit() }.toIntOrNull()
+
+    if (cleanInput != cleanFret) return false
+    return if (inputOctave != null && fretOctave != null) {
+        inputOctave == fretOctave
+    } else {
+        true
+    }
+}
+
 private fun getGuitarNoteAt(openNote: String, fret: Int): String {
     val chromatic = listOf("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
     val base = openNote.takeWhile { it.isLetter() || it == '#' || it == 'b' }
+    val octaveStr = openNote.filter { it.isDigit() }
+    val startOctave = octaveStr.toIntOrNull() ?: 4
     val idx = chromatic.indexOf(base)
     if (idx == -1) return openNote
-    val targetIdx = (idx + fret) % 12
-    return chromatic[targetIdx]
+    val totalHalfSteps = idx + fret
+    val targetIdx = totalHalfSteps % 12
+    val targetOctave = startOctave + (totalHalfSteps / 12)
+    return "${chromatic[targetIdx]}$targetOctave"
 }
 
 /**

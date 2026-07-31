@@ -1,5 +1,9 @@
 package com.example.ui.navigation
 
+import android.content.Intent
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
@@ -14,12 +18,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.ui.UniversalSendToButton
+import com.example.util.UniversalAudioMetadataExtractor
 import com.example.viewmodel.WorkstationViewModel
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -32,12 +38,31 @@ fun ModuleToolbar(
     viewModel: WorkstationViewModel,
     onOpenDrawer: () -> Unit,
     onOpenSendToDialog: (sourceName: String) -> Unit,
+    onImportAudioClick: (() -> Unit)? = null,
     onQuickRecordClick: () -> Unit = {},
     onSettingsClick: () -> Unit = {}
 ) {
+    val context = LocalContext.current
     val currentChordModel by viewModel.currentChord.collectAsStateWithLifecycle()
     val globalKey by viewModel.globalKeySignature.collectAsStateWithLifecycle()
     val isPlaying by viewModel.isStemPlaybackActive.collectAsStateWithLifecycle()
+
+    val documentLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            try {
+                context.contentResolver.takePersistableUriPermission(
+                    uri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+            val metadata = UniversalAudioMetadataExtractor.extractMetadataFromUri(context, uri)
+            viewModel.importUniversalAudio(metadata)
+        }
+    }
 
     TopAppBar(
         colors = TopAppBarDefaults.topAppBarColors(
@@ -112,7 +137,7 @@ fun ModuleToolbar(
                 shape = RoundedCornerShape(6.dp),
                 color = Color(0xFF13233C),
                 border = BorderStroke(1.dp, Color(0xFF1E3A60)),
-                modifier = Modifier.padding(end = 6.dp)
+                modifier = Modifier.padding(end = 4.dp)
             ) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
@@ -132,6 +157,39 @@ fun ModuleToolbar(
                         color = Color(0xFFD4AF37)
                     )
                 }
+            }
+
+            // Universal Import Audio Action Button
+            Button(
+                onClick = {
+                    if (onImportAudioClick != null) {
+                        onImportAudioClick()
+                    } else {
+                        documentLauncher.launch(arrayOf("audio/*"))
+                    }
+                },
+                colors = ButtonDefaults.buttonColors(containerColor = accentColor.copy(alpha = 0.2f)),
+                border = BorderStroke(1.dp, accentColor),
+                shape = RoundedCornerShape(6.dp),
+                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                modifier = Modifier
+                    .height(28.dp)
+                    .padding(end = 4.dp)
+                    .testTag("toolbar_import_audio_button")
+            ) {
+                Icon(
+                    imageVector = Icons.Default.UploadFile,
+                    contentDescription = "Import Audio File",
+                    tint = accentColor,
+                    modifier = Modifier.size(14.dp)
+                )
+                Spacer(modifier = Modifier.width(4.dp))
+                Text(
+                    text = "IMPORT",
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = accentColor
+                )
             }
 
             // Universal Send To Action Button on Module Toolbar

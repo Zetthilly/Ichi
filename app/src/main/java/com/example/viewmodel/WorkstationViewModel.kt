@@ -1,6 +1,7 @@
 package com.example.viewmodel
 
 import android.app.Application
+import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.audio.AudioWorkstationEngine
@@ -23,6 +24,9 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import java.io.File
 
+import dagger.hilt.android.lifecycle.HiltViewModel
+import javax.inject.Inject
+
 data class TrackChordEntry(
     val id: String = java.util.UUID.randomUUID().toString(),
     val timeMs: Long,
@@ -37,13 +41,18 @@ data class TrackChordEntry(
     val formula: String
 )
 
-class WorkstationViewModel(application: Application) : AndroidViewModel(application) {
+class WorkstationViewModel @Inject constructor(
+    application: Application,
+    val repository: MusicWorkstationRepository,
+    val masterAudioEngine: com.example.audio.HZAudioEngine,
+    val userPreferencesRepository: UserPreferencesRepository
+) : AndroidViewModel(application) {
 
     private val database = AppDatabase.getDatabase(application)
-    private val repository = MusicWorkstationRepository(database.workstationDao())
-    val masterAudioEngine = com.example.audio.MasterAudioEngine(application)
     val engine = AudioWorkstationEngine()
     private val sharedPrefs = application.getSharedPreferences("hz_audio_workstation_prefs", android.content.Context.MODE_PRIVATE)
+
+    val oboeAudioEngine = com.example.audio.OboeAudioEngine()
 
     // Master Audio Engine Real Flow Proxies
     val masterIsPlaying: StateFlow<Boolean> = masterAudioEngine.isPlaying
@@ -54,7 +63,6 @@ class WorkstationViewModel(application: Application) : AndroidViewModel(applicat
     val masterErrorMessage: StateFlow<String?> = masterAudioEngine.errorMessage
 
     // Jetpack DataStore Repository for User Preferences & Module States
-    val userPreferencesRepository = UserPreferencesRepository(application)
     val userPreferences: StateFlow<UserPreferences> = userPreferencesRepository.userPreferencesFlow
         .stateIn(
             scope = viewModelScope,
@@ -1025,6 +1033,19 @@ class WorkstationViewModel(application: Application) : AndroidViewModel(applicat
             }
         }
 
+        // Collect real-time transcription from HZAudioEngine during playback/recording
+        viewModelScope.launch {
+            masterAudioEngine.harmonicTranscriber.currentTranscription.collect { transcription ->
+                if (transcription != null) {
+                    val chord = transcription.chordInfo
+                    engine.setCurrentChord(chord)
+                    if (transcription.activeNotes.isNotEmpty()) {
+                        feedPerformanceNotes(transcription.activeNotes, chord.name)
+                    }
+                }
+            }
+        }
+
         // Run background seed to populate gorgeous mock data if database is empty
         viewModelScope.launch(Dispatchers.IO) {
             seedInitialDatabase()
@@ -1260,7 +1281,27 @@ class WorkstationViewModel(application: Application) : AndroidViewModel(applicat
 
     // Professional Recording Storage and Reuse System™ Actions
     fun toggleRecording() {
+        val wasRec = engine.isRecording.value
         engine.toggleRecording()
+        if (!wasRec) {
+            val success = oboeAudioEngine.startRecording { pcmBuffer ->
+                val transcription = masterAudioEngine.harmonicTranscriber.analyzePcmBuffer(pcmBuffer)
+                engine.updateTunerFromPcm(pcmBuffer)
+                if (transcription.activeNotes.isNotEmpty()) {
+                    feedPerformanceNotes(transcription.activeNotes, transcription.chordInfo.name)
+                }
+            }
+            if (!success) {
+                Log.w("WorkstationViewModel", "Oboe/AudioRecord failed to start mic recording")
+            }
+        } else {
+            oboeAudioEngine.stopRecording()
+        }
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        oboeAudioEngine.release()
     }
 
     fun setRecordingSearchQuery(query: String) {

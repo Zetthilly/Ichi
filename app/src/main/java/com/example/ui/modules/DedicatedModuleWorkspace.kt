@@ -1,5 +1,6 @@
 package com.example.ui.modules
 
+import android.content.Intent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import android.net.Uri
@@ -32,10 +33,12 @@ import com.example.ui.PitchAndTimeControlPanel
 import com.example.ui.PracticeCenterWorkspace
 import com.example.ui.ProfessionalVisualAnalyzersCard
 import com.example.ui.UniversalSendToButton
+import com.example.ui.components.AudioSourceBannerCard
 import com.example.ui.navigation.AppModuleRegistry
 import com.example.ui.navigation.AppModule
 import com.example.ui.navigation.ModuleToolbar
 import com.example.ui.recording.RecordingLibraryScreen
+import com.example.util.UniversalAudioMetadataExtractor
 import com.example.viewmodel.WorkstationViewModel
 
 @Composable
@@ -139,6 +142,14 @@ fun DedicatedModuleWorkspace(
                         }
                     }
                 }
+            }
+
+            // Universal Audio Source State Banner
+            item {
+                AudioSourceBannerCard(
+                    viewModel = viewModel,
+                    onOpenSendToDialog = onOpenSendToDialog
+                )
             }
 
             // Interactive Workspace Content Block
@@ -258,10 +269,19 @@ private fun AudioPlayerWorkspaceContent(
     val errorMessage by masterEngine.errorMessage.collectAsStateWithLifecycle()
 
     val filePickerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.GetContent()
+        contract = ActivityResultContracts.OpenDocument()
     ) { uri: Uri? ->
         if (uri != null) {
-            masterEngine.loadAudioUri(uri)
+            try {
+                context.contentResolver.takePersistableUriPermission(
+                    uri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+            val metadata = UniversalAudioMetadataExtractor.extractMetadataFromUri(context, uri)
+            viewModel.importUniversalAudio(metadata)
         }
     }
 
@@ -342,7 +362,7 @@ private fun AudioPlayerWorkspaceContent(
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Button(
-                            onClick = { filePickerLauncher.launch("audio/*") },
+                            onClick = { filePickerLauncher.launch(arrayOf("audio/*")) },
                             colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF00E5FF)),
                             shape = RoundedCornerShape(8.dp),
                             modifier = Modifier.weight(1f).testTag("import_audio_button")

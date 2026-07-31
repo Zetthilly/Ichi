@@ -19,13 +19,13 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
 data class OboeStreamMetrics(
-    val apiBackend: String = "Oboe AAudio Low-Latency (C++)",
+    val apiBackend: String = "Android AudioTrack Low-Latency Buffer",
     val sampleRateHz: Int = 48000,
-    val bufferCapacityFrames: Int = 192, // ~4ms buffer at 48kHz
+    val bufferCapacityFrames: Int = 192,
     val framesWritten: Long = 0L,
     val underrunCount: Int = 0,
-    val latencyMs: Float = 4.2f,
-    val sharedMemoryPointerHex: String = "0x7F9B1000",
+    val latencyMs: Float = (192f / 48000f) * 1000f, // Dynamically computed from frame capacity
+    val sharedMemoryPointerHex: String = "Shared ByteBuffer Direct Memory",
     val activeRoutingModulesCount: Int = 12,
     val isEngineRunning: Boolean = false
 )

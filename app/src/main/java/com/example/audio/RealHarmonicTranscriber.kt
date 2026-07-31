@@ -20,97 +20,123 @@ class RealHarmonicTranscriber(
 
     private val classifier = AudioClassifier(context)
 
-    data class TranscriptionResult(
-        val chordInfo: DetectedChordInfo,
-        val activeNotes: List<String>,
-        val arpeggioPattern: String?,
-        val africanStyleLick: String?,
-        val ChromaProfile: FloatArray
+    data class DetectedNoteEvent(
+    val noteName: String, // e.g. "C", "F#"
+    val octave: Int = 4,   // e.g. 4 -> "C4"
+    val fullNoteName: String = "$noteName$octave",
+    val onsetTimeMs: Long = System.currentTimeMillis(),
+    val magnitude: Float = 1.0f
+)
+
+data class TranscriptionResult(
+    val chordInfo: DetectedChordInfo,
+    val activeNotes: List<String>,
+    val noteEvents: List<DetectedNoteEvent> = emptyList(),
+    val arpeggioPattern: String?,
+    val africanStyleLick: String?,
+    val ChromaProfile: FloatArray
+)
+
+private val _currentTranscription = MutableStateFlow<TranscriptionResult?>(null)
+val currentTranscription: StateFlow<TranscriptionResult?> = _currentTranscription.asStateFlow()
+
+private val noteNames = listOf("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
+
+init {
+    classifier.loadModel()
+}
+
+/**
+ * Analyzes a slice of real audio PCM samples.
+ */
+fun analyzePcmBuffer(samples: FloatArray, sampleRate: Int = 44100): TranscriptionResult {
+    if (samples.isEmpty()) return createEmptyResult()
+
+    // 1. Run ONNX / DSP Chromagram chord classification
+    val classification = classifier.classifyAudioBuffer(samples, sampleRate)
+
+    // 2. Perform FFT peak picking for exact note stream with octave, timestamp & magnitude
+    val noteEvents = detectActiveNoteEventsPcm(samples, sampleRate)
+    val activeNotes = if (noteEvents.isNotEmpty()) {
+        noteEvents.map { it.fullNoteName }
+    } else {
+        getNotesForChord(classification.chordName)
+    }
+
+    // 3. Match African Guitar arpeggio lick patterns (Sungura, Rhumba, Soukous)
+    val arpeggio = detectArpeggioPattern(activeNotes, classification.chordName)
+    val AfricanLick = detectAfricanLickStyle(activeNotes, classification.chordName)
+
+    val chordInfo = DetectedChordInfo(
+        name = classification.chordName,
+        root = classification.rootNote,
+        formula = getChordFormula(classification.chordQuality),
+        notes = activeNotes,
+        confidence = classification.confidence,
+        frequency = getRootFrequency(classification.rootNote),
+        type = classification.chordQuality,
+        description = "Analyzed from real audio harmonic spectrum profile.",
+        suggestedSubstitutions = getSuggestedSubstitutions(classification.chordName)
     )
 
-    private val _currentTranscription = MutableStateFlow<TranscriptionResult?>(null)
-    val currentTranscription: StateFlow<TranscriptionResult?> = _currentTranscription.asStateFlow()
+    val result = TranscriptionResult(
+        chordInfo = chordInfo,
+        activeNotes = activeNotes,
+        noteEvents = noteEvents,
+        arpeggioPattern = arpeggio,
+        africanStyleLick = AfricanLick,
+        ChromaProfile = classification.chromaProfile
+    )
 
-    private val noteNames = listOf("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
+    _currentTranscription.value = result
+    return result
+}
 
-    init {
-        classifier.loadModel()
-    }
+private fun detectActiveNoteEventsPcm(samples: FloatArray, sampleRate: Int): List<DetectedNoteEvent> {
+    val detectedEvents = mutableListOf<DetectedNoteEvent>()
+    val numSamples = samples.size
+    if (numSamples < 256) return emptyList()
 
-    /**
-     * Analyzes a slice of real audio PCM samples.
-     */
-    fun analyzePcmBuffer(samples: FloatArray, sampleRate: Int = 44100): TranscriptionResult {
-        if (samples.isEmpty()) return createEmptyResult()
+    val pitchFreqs = doubleArrayOf(
+        130.81, 138.59, 146.83, 155.56, 164.81, 174.61, 185.00, 196.00, 207.65, 220.00, 233.08, 246.94
+    )
 
-        // 1. Run ONNX / DSP Chromagram chord classification
-        val classification = classifier.classifyAudioBuffer(samples, sampleRate)
+    val nowMs = System.currentTimeMillis()
 
-        // 2. Perform FFT peak picking for exact note stream (including grace notes)
-        val activeNotes = detectActiveNotesPcm(samples, sampleRate)
+    for (i in 0 until 12) {
+        val baseFreq = pitchFreqs[i]
+        val name = noteNames[i]
 
-        // 3. Match African Guitar arpeggio lick patterns (Sungura, Rhumba, Soukous)
-        val arpeggio = detectArpeggioPattern(activeNotes, classification.chordName)
-        val AfricanLick = detectAfricanLickStyle(activeNotes, classification.chordName)
-
-        val chordInfo = DetectedChordInfo(
-            name = classification.chordName,
-            root = classification.rootNote,
-            formula = getChordFormula(classification.chordQuality),
-            notes = if (activeNotes.isNotEmpty()) activeNotes else getNotesForChord(classification.chordName),
-            confidence = classification.confidence,
-            frequency = getRootFrequency(classification.rootNote),
-            type = classification.chordQuality,
-            description = "Analyzed from real audio harmonic spectrum profile.",
-            suggestedSubstitutions = getSuggestedSubstitutions(classification.chordName)
-        )
-
-        val result = TranscriptionResult(
-            chordInfo = chordInfo,
-            activeNotes = activeNotes,
-            arpeggioPattern = arpeggio,
-            africanStyleLick = AfricanLick,
-            ChromaProfile = classification.chromaProfile
-        )
-
-        _currentTranscription.value = result
-        return result
-    }
-
-    private fun detectActiveNotesPcm(samples: FloatArray, sampleRate: Int): List<String> {
-        val detected = mutableSetOf<String>()
-        val numSamples = samples.size
-
-        // Sample frequencies across octaves 2 to 5 (65Hz to 1046Hz)
-        val pitchFreqs = doubleArrayOf(
-            130.81, 138.59, 146.83, 155.56, 164.81, 174.61, 185.00, 196.00, 207.65, 220.00, 233.08, 246.94
-        )
-
-        for (i in 0 until 12) {
-            val baseFreq = pitchFreqs[i]
-            var maxMag = 0.0
-            for (octave in 1..4) {
-                val freq = baseFreq * (1 shl (octave - 1))
-                val k = (freq * numSamples / sampleRate).toInt()
-                if (k in 1 until numSamples / 2) {
-                    var real = 0.0
-                    var imag = 0.0
-                    val step = (numSamples / 128).coerceAtLeast(1)
-                    for (j in 0 until numSamples step step) {
-                        val angle = 2.0 * Math.PI * k * j / numSamples
-                        real += samples[j] * cos(angle)
-                        imag -= samples[j] * sin(angle)
-                    }
-                    val mag = Math.sqrt(real * real + imag * imag)
-                    if (mag > maxMag) maxMag = mag
+        for (octaveIdx in 1..4) {
+            val octaveNum = octaveIdx + 2 // 3, 4, 5, 6
+            val freq = baseFreq * (1 shl (octaveIdx - 1))
+            val k = (freq * numSamples / sampleRate).toInt()
+            if (k in 1 until numSamples / 2) {
+                var real = 0.0
+                var imag = 0.0
+                val step = (numSamples / 128).coerceAtLeast(1)
+                for (j in 0 until numSamples step step) {
+                    val angle = 2.0 * Math.PI * k * j / numSamples
+                    real += samples[j] * cos(angle)
+                    imag -= samples[j] * sin(angle)
+                }
+                val mag = Math.sqrt(real * real + imag * imag).toFloat()
+                if (mag > 8.0f) {
+                    detectedEvents.add(
+                        DetectedNoteEvent(
+                            noteName = name,
+                            octave = octaveNum,
+                            fullNoteName = "$name$octaveNum",
+                            onsetTimeMs = nowMs,
+                            magnitude = mag
+                        )
+                    )
                 }
             }
-            if (maxMag > 12.0) {
-                detected.add(noteNames[i])
-            }
         }
-        return detected.toList()
     }
+    return detectedEvents.sortedByDescending { it.magnitude }
+}
 
     private fun detectArpeggioPattern(notes: List<String>, chordName: String): String? {
         if (notes.size < 2) return null

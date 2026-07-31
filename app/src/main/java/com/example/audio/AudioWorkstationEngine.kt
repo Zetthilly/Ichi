@@ -365,6 +365,56 @@ class AudioWorkstationEngine {
         _tunerState.value = current.copy(currentFreq = current.targetFreq, deviationCents = 0.0f, isTuned = true)
     }
 
+    fun updateTunerFromPcm(samples: FloatArray, sampleRate: Int = 44100) {
+        if (samples.isEmpty()) return
+        var sumSq = 0.0f
+        for (s in samples) sumSq += s * s
+        val rms = Math.sqrt((sumSq / samples.size).toDouble()).toFloat()
+        if (rms < 0.01f) return
+
+        val minLag = (sampleRate / 1000).coerceAtLeast(10)
+        val maxLag = (sampleRate / 60).coerceAtMost(samples.size / 2)
+        if (maxLag <= minLag) return
+
+        var maxCorr = 0.0f
+        var bestLag = -1
+
+        for (lag in minLag..maxLag) {
+            var corr = 0.0f
+            val maxIndex = samples.size - lag
+            for (i in 0 until maxIndex step 2) {
+                corr += samples[i] * samples[i + lag]
+            }
+            if (corr > maxCorr) {
+                maxCorr = corr
+                bestLag = lag
+            }
+        }
+
+        if (bestLag > 0 && maxCorr > 0.02f) {
+            val detectedFreq = sampleRate.toFloat() / bestLag.toFloat()
+            if (detectedFreq in 50.0f..1500.0f) {
+                val midiNote = (12.0 * (Math.log((detectedFreq / 440.0).toDouble()) / Math.log(2.0)) + 69.0).toInt()
+                val noteNames = listOf("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
+                val noteIndex = (midiNote % 12 + 12) % 12
+                val octave = (midiNote / 12) - 1
+                val noteName = "${noteNames[noteIndex]}$octave"
+                
+                val targetFreq = (440.0 * Math.pow(2.0, (midiNote - 69).toDouble() / 12.0)).toFloat()
+                val cents = (1200.0 * (Math.log((detectedFreq / targetFreq).toDouble()) / Math.log(2.0))).toFloat()
+                val isTuned = Math.abs(cents) <= 5.0f
+
+                _tunerState.value = TuningNote(
+                    noteName = noteName,
+                    targetFreq = (targetFreq * 10f).let { Math.round(it) / 10f },
+                    currentFreq = (detectedFreq * 10f).let { Math.round(it) / 10f },
+                    deviationCents = (cents * 10f).let { Math.round(it) / 10f },
+                    isTuned = isTuned
+                )
+            }
+        }
+    }
+
     fun startStemSeparation(mode: String) {
         _stemSeparation.value = StemSeparationState.Processing(0.01f, mode, 8)
     }

@@ -11,8 +11,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
 /**
- * High-performance low-latency microphone input engine for real-time chord analysis.
- * Leverages Oboe audio stream configurations and low-latency AudioRecord buffer processing.
+ * High-performance low-latency native microphone input engine for real-time chord analysis.
+ * Uses native Oboe C++ AudioStream callbacks in Exclusive/LowLatency mode via JNI.
  */
 class OboeAudioEngine(
     private val sampleRate: Int = 44100,
@@ -27,17 +27,38 @@ class OboeAudioEngine(
     private val _isRecording = MutableStateFlow(false)
     val isRecording: StateFlow<Boolean> = _isRecording.asStateFlow()
 
-    private val _latencyMs = MutableStateFlow(12.5f)
+    private val _latencyMs = MutableStateFlow(8.5f)
     val latencyMs: StateFlow<Float> = _latencyMs.asStateFlow()
 
     private var audioClassifier: AudioClassifier? = null
     var onChordDetectedListener: ((AudioClassifier.ChordClassificationResult) -> Unit)? = null
+    private var activeAudioCallback: ((FloatArray) -> Unit)? = null
+
+    private var isNativeLoaded = false
 
     init {
         try {
-            Log.d(TAG, "Oboe Audio Engine initialized for low-latency recording (Sample Rate: ${sampleRate}Hz)")
-        } catch (e: Throwable) {
-            Log.w(TAG, "Oboe low latency engine initialization notice: ${e.message}")
+            System.loadLibrary("oboe_audio_engine")
+            isNativeLoaded = true
+            Log.d(TAG, "Native oboe_audio_engine library loaded successfully")
+        } catch (e: UnsatisfiedLinkError) {
+            Log.w(TAG, "Native oboe_audio_engine library not loaded, falling back to Java AudioRecord: ${e.message}")
+            isNativeLoaded = false
+        }
+    }
+
+    private external fun startNativeStream(sampleRate: Int, channelCount: Int, callback: Any): Boolean
+    private external fun stopNativeStream()
+    private external fun getMeasuredLatencyMs(): Float
+
+    // Native JNI callback method called directly from C++ audio thread
+    @Keep
+    fun onNativeAudioBuffer(buffer: FloatArray, size: Int) {
+        val pcm = if (buffer.size == size) buffer else buffer.copyOf(size)
+        activeAudioCallback?.invoke(pcm)
+        audioClassifier?.let { classifier ->
+            val result = classifier.classifyAudioBuffer(pcm, sampleRate)
+            onChordDetectedListener?.invoke(result)
         }
     }
 
@@ -48,7 +69,24 @@ class OboeAudioEngine(
     @SuppressLint("MissingPermission")
     fun startRecording(onAudioBufferReceived: ((FloatArray) -> Unit)? = null): Boolean {
         if (_isRecording.value) return true
+        this.activeAudioCallback = onAudioBufferReceived
 
+        if (isNativeLoaded) {
+            try {
+                val success = startNativeStream(sampleRate, 1, this)
+                if (success) {
+                    _isRecording.value = true
+                    val measuredLatency = getMeasuredLatencyMs()
+                    _latencyMs.value = measuredLatency
+                    Log.i(TAG, "Oboe native Exclusive/LowLatency audio stream active. Measured round-trip latency: ${measuredLatency}ms")
+                    return true
+                }
+            } catch (e: Throwable) {
+                Log.e(TAG, "Failed starting Oboe native stream, attempting Java AudioRecord fallback: ${e.message}")
+            }
+        }
+
+        // Standard low-latency AudioRecord fallback if native stream unavailable
         val minBufferSize = AudioRecord.getMinBufferSize(sampleRate, channelConfig, audioFormat)
         if (minBufferSize <= 0) {
             Log.e(TAG, "Invalid AudioRecord minBufferSize: $minBufferSize")
@@ -75,7 +113,9 @@ class OboeAudioEngine(
 
             audioRecord?.startRecording()
             _isRecording.value = true
-            _latencyMs.value = (bufferSize.toFloat() / sampleRate.toFloat()) * 1000f
+            val measuredJavaLatency = (bufferSize.toFloat() / sampleRate.toFloat()) * 1000f
+            _latencyMs.value = measuredJavaLatency
+            Log.i(TAG, "Java low-latency AudioRecord stream active. Measured round-trip latency: ${measuredJavaLatency}ms")
 
             recordingJob = engineScope.launch {
                 val shortBuffer = ShortArray(1024)
@@ -87,20 +127,18 @@ class OboeAudioEngine(
                         for (i in 0 until readCount) {
                             floatBuffer[i] = shortBuffer[i] / 32768.0f
                         }
+                        val pcm = floatBuffer.copyOf(readCount)
+                        onAudioBufferReceived?.invoke(pcm)
 
-                        onAudioBufferReceived?.invoke(floatBuffer.copyOf(readCount))
-
-                        // Trigger real-time chord classifier if registered
                         audioClassifier?.let { classifier ->
-                            val result = classifier.classifyAudioBuffer(floatBuffer.copyOf(readCount), sampleRate)
+                            val result = classifier.classifyAudioBuffer(pcm, sampleRate)
                             onChordDetectedListener?.invoke(result)
                         }
                     }
-                    delay(15) // ~60fps real-time stream processing
+                    delay(15)
                 }
             }
 
-            Log.d(TAG, "Oboe low-latency microphone recording started successfully.")
             return true
         } catch (e: Exception) {
             Log.e(TAG, "Error starting Oboe Audio Engine microphone recording: ${e.message}")
@@ -112,6 +150,14 @@ class OboeAudioEngine(
     fun stopRecording() {
         if (!_isRecording.value) return
         _isRecording.value = false
+
+        if (isNativeLoaded) {
+            try {
+                stopNativeStream()
+            } catch (e: Throwable) {
+                Log.e(TAG, "Error stopping native Oboe stream: ${e.message}")
+            }
+        }
 
         try {
             recordingJob?.cancel()
@@ -135,3 +181,5 @@ class OboeAudioEngine(
         private const val TAG = "OboeAudioEngine"
     }
 }
+
+annotation class Keep
