@@ -16,6 +16,13 @@
 # debugging stack traces.
 #-keepattributes SourceFile,LineNumberTable
 
-# If you keep the line number information, uncomment this to
-# hide the original source file name.
-#-renamesourcefileattribute SourceFile
+# Preserve Oboe Audio Engine JNI callback
+-keep class com.example.audio.OboeAudioEngine {
+    @androidx.annotation.Keep <methods>;
+    void onNativeAudioBuffer(float[], int);
+}
+
+-keep class com.example.** { *; }
+-keep class dagger.hilt.** { *; }
+-keep class hilt_aggregated_deps.** { *; }
+

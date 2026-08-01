@@ -56,24 +56,6 @@ fun RecordingLibraryScreen(
     var selectedRecordingForRename by remember { mutableStateOf<RecordingAssetEntity?>(null) }
     var selectedRecordingForNotes by remember { mutableStateOf<RecordingAssetEntity?>(null) }
 
-    // Seed mock initial recording assets if completely empty for instant showcase
-    LaunchedEffect(recordings.isEmpty()) {
-        if (recordings.isEmpty()) {
-            viewModel.saveNewRecordingAsset(
-                name = "Sungura Lead Guitar 01",
-                pcmSamples = FloatArray(44100 * 4) { (Math.sin(it * 0.05) * 0.6).toFloat() },
-                format = "WAV",
-                notes = "Recorded live lead guitar passage with fast triplet licks."
-            )
-            viewModel.saveNewRecordingAsset(
-                name = "Keyboard Worship Progression in G",
-                pcmSamples = FloatArray(44100 * 6) { (Math.sin(it * 0.03) * 0.5).toFloat() },
-                format = "FLAC",
-                notes = "Spiritual chords G - D/F# - Em - C with extended voicings."
-            )
-        }
-    }
-
     val filteredRecordings = remember(recordings, searchQuery, sortOrder, favoriteOnlyFilter) {
         recordings.filter { rec ->
             val matchesQuery = searchQuery.isBlank() ||
@@ -116,14 +98,8 @@ fun RecordingLibraryScreen(
                     onNotesChange = { activeNotes = it },
                     onToggleRecord = {
                         if (isRecordingState) {
-                            viewModel.toggleRecording()
-                            // Generate synthetic PCM and auto-save as recording asset
-                            val pcm = FloatArray(44100 * (recordingTimerSeconds.coerceAtLeast(2))) { i ->
-                                (Math.sin(i * 0.04) * 0.5 + Math.sin(i * 0.08) * 0.3).toFloat()
-                            }
-                            viewModel.saveNewRecordingAsset(
+                            viewModel.toggleRecording(
                                 name = activeRecordingName,
-                                pcmSamples = pcm,
                                 format = selectedFormat,
                                 notes = activeNotes
                             )

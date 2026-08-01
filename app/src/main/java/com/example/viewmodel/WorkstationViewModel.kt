@@ -41,6 +41,7 @@ data class TrackChordEntry(
     val formula: String
 )
 
+@HiltViewModel
 class WorkstationViewModel @Inject constructor(
     application: Application,
     val repository: MusicWorkstationRepository,
@@ -1279,12 +1280,20 @@ class WorkstationViewModel @Inject constructor(
         }
     }
 
+    private val recordedPcmList = java.util.Collections.synchronizedList(mutableListOf<Float>())
+
     // Professional Recording Storage and Reuse System™ Actions
-    fun toggleRecording() {
+    fun toggleRecording(name: String = "New Session Recording", format: String = "WAV", notes: String = "") {
         val wasRec = engine.isRecording.value
         engine.toggleRecording()
         if (!wasRec) {
+            recordedPcmList.clear()
             val success = oboeAudioEngine.startRecording { pcmBuffer ->
+                synchronized(recordedPcmList) {
+                    for (sample in pcmBuffer) {
+                        recordedPcmList.add(sample)
+                    }
+                }
                 val transcription = masterAudioEngine.harmonicTranscriber.analyzePcmBuffer(pcmBuffer)
                 engine.updateTunerFromPcm(pcmBuffer)
                 if (transcription.activeNotes.isNotEmpty()) {
@@ -1296,6 +1305,21 @@ class WorkstationViewModel @Inject constructor(
             }
         } else {
             oboeAudioEngine.stopRecording()
+            val pcmArray = synchronized(recordedPcmList) {
+                if (recordedPcmList.isNotEmpty()) {
+                    recordedPcmList.toFloatArray()
+                } else {
+                    FloatArray(0)
+                }
+            }
+            if (pcmArray.isNotEmpty()) {
+                saveNewRecordingAsset(
+                    name = name,
+                    pcmSamples = pcmArray,
+                    format = format,
+                    notes = notes
+                )
+            }
         }
     }
 
@@ -1570,18 +1594,48 @@ class WorkstationViewModel @Inject constructor(
         engine.simulateProgression(symbols)
     }
 
-    // Simulated Stem Separation with dynamic progress ticks
+    // Real Stem Separation running chunked STFT engine on real audio data
     fun runStemSeparation(mode: String) {
         engine.startStemSeparation(mode)
         viewModelScope.launch {
-            for (i in 1..20) {
-                delay(150L) // slightly faster for premium snappy feels
-                engine.updateStemProgress(i.toFloat() / 20.0f)
+            val realSamples = masterAudioEngine.getActivePcmSamples()
+                ?: oboeAudioEngine.getLatestRecordedPcmBuffer()
+                ?: FloatArray(0)
+
+            // Progress monitoring job
+            val progressJob = launch {
+                masterAudioEngine.stemEngine.separationProgress.collect { progress ->
+                    engine.updateStemProgress(progress)
+                }
             }
-            // Trigger Gemini AI analysis with the uploaded file info
-            val filename = uploadedFileName.value ?: "unknown_acoustic_session.wav"
+
+            // Execute real chunked STFT separation
+            masterAudioEngine.stemEngine.separateMasterPcm(realSamples, sampleRate = 44100, qualityMode = mode)
+            progressJob.cancel()
+
+            engine.setStemSeparationState(
+                StemSeparationState.Success(
+                    mixerState = masterAudioEngine.stemEngine.stemMixerState.value
+                )
+            )
+
+            // Trigger grounded Gemini AI analysis with real audio parameters
+            val filename = uploadedFileName.value ?: "live_acoustic_session.wav"
             val filesize = uploadedFileSize.value ?: "7.8 MB"
-            val analysis = com.example.util.GeminiClient.describeAudioFile(filename, filesize, mode)
+            val currentBpm = bpm.value
+            val currentKey = globalKeySignature.value ?: "C Major"
+            val chordList = chordTimeline.value.map { it.name }
+            val chroma = masterAudioEngine.harmonicTranscriber.currentTranscription.value?.ChromaProfile
+
+            val analysis = com.example.util.GeminiClient.describeAudioFile(
+                fileName = filename,
+                fileSize = filesize,
+                processingMode = mode,
+                bpm = currentBpm,
+                key = currentKey,
+                chordProgression = chordList,
+                chromaProfile = chroma
+            )
             engine.setAiAnalysisResult(analysis)
         }
     }
@@ -1668,36 +1722,38 @@ class WorkstationViewModel @Inject constructor(
                                 format = format
                             )
                         } else {
-                            val dummyChords = chordTimeline.value.mapIndexed { idx, info ->
+                            val detectedChords = chordTimeline.value.mapIndexed { idx, info ->
+                                val parsed = engine.buildChordInfo(info.name)
                                 com.example.data.DetectedChord(
                                     timestampMs = idx * 1000L,
                                     chordName = info.name,
-                                    rootNote = info.name.take(1),
-                                    chordType = "Major",
+                                    rootNote = parsed.root,
+                                    chordType = parsed.type,
                                     notes = info.notes.joinToString(",")
                                 )
                             }
                             com.example.util.AdvancedExportEngine.exportChordTranscription(
                                 context = getApplication(),
-                                chords = dummyChords,
+                                chords = detectedChords,
                                 keySignature = targetSession.keySignature,
                                 format = format
                             )
                         }
                     }
                     com.example.util.AdvancedExportEngine.ExportFormat.CHORD_SHEET -> {
-                        val dummyChords = chordTimeline.value.mapIndexed { idx, info ->
+                        val detectedChords = chordTimeline.value.mapIndexed { idx, info ->
+                            val parsed = engine.buildChordInfo(info.name)
                             com.example.data.DetectedChord(
                                 timestampMs = idx * 1000L,
                                 chordName = info.name,
-                                rootNote = info.name.take(1),
-                                chordType = "Major",
+                                rootNote = parsed.root,
+                                chordType = parsed.type,
                                 notes = info.notes.joinToString(",")
                             )
                         }
                         com.example.util.AdvancedExportEngine.exportChordTranscription(
                             context = getApplication(),
-                            chords = dummyChords,
+                            chords = detectedChords,
                             keySignature = targetSession.keySignature,
                             format = format
                         )
@@ -1723,15 +1779,17 @@ class WorkstationViewModel @Inject constructor(
 
     fun triggerStemExport(stemName: String, format: com.example.util.AdvancedExportEngine.ExportFormat) {
         viewModelScope.launch {
-            _exportLog.value = "PREPARING STEM EXPORT FOR: '$stemName'..."
-            delay(300)
+            _exportLog.value = "PREPARING REAL STEM EXPORT FOR: '$stemName'..."
+            delay(200)
             try {
+                val stemBuffer = masterAudioEngine.stemEngine.getStemBuffer(stemName)
                 val result = com.example.util.AdvancedExportEngine.exportIndividualStem(
                     context = getApplication(),
                     stemName = stemName,
-                    format = format
+                    format = format,
+                    stemPcm = stemBuffer
                 )
-                _exportLog.value = "Stem Export Success! [${result.title}]\nFile: ${result.file.absolutePath}"
+                _exportLog.value = "Stem Export Success! [${result.title}]\nFile: ${result.file.absolutePath}\nSize: ${result.sizeBytes} bytes"
             } catch (e: Exception) {
                 _exportLog.value = "Stem Export Error: ${e.message}"
             }

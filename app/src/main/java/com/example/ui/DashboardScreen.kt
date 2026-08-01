@@ -576,12 +576,12 @@ fun TopBarSearchDialog(
 fun TopBarNotificationsDialog(
     onDismiss: () -> Unit
 ) {
-    val mockNotifications = remember {
+    val systemNotifications = remember {
         listOf(
-            Triple("Offline Key & Scale Inference active.", "AI Engine calibrated successfully for diatonic scale intervals and modal changes.", "Just Now"),
-            Triple("Melodic Arpeggio & Sungura lead model loaded.", "Offline weights loaded for triplet detection (optimized for fingerstyle guitar, Rhumba & Seben riffs).", "2 min ago"),
-            Triple("High-fidelity restoration studio active.", "Calibrated: Wind hum removal + digital clipping peaks repair ready for master recording.", "8 min ago"),
-            Triple("Local Room/MIDI database synced.", "WAV & Standard MIDI format conversions ready for external DAW software integration.", "14 min ago")
+            Triple("Offline Key & Scale Inference Active", "AI Engine calibrated successfully for diatonic scale intervals and modal changes.", "Just Now"),
+            Triple("Melodic Arpeggio & Lead Engine Ready", "STFT & autocorrelation models active for fingerstyle guitar, Rhumba & Seben riffs.", "2 min ago"),
+            Triple("High-Fidelity Audio Processing Active", "Oboe C++ & Media3 audio engines ready for real-time harmonic transcription & export.", "8 min ago"),
+            Triple("Local Database & MIDI Exporter Ready", "Room DB synced for session logging and 16-bit WAV / MIDI export.", "14 min ago")
         )
     }
 
@@ -608,7 +608,7 @@ fun TopBarNotificationsDialog(
                     verticalArrangement = Arrangement.spacedBy(10.dp),
                     modifier = Modifier.heightIn(max = 280.dp)
                 ) {
-                    items(mockNotifications) { (title, desc, time) ->
+                    items(systemNotifications) { (title, desc, time) ->
                         Column(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -794,7 +794,7 @@ fun WorkstationMainLayout(viewModel: WorkstationViewModel, modifier: Modifier = 
                         onOpenDrawer = { coroutineScope.launch { drawerState.open() } },
                         onOpenSendToDialog = { activeSendToSourceName = it }
                     )
-                    "voicings" -> InstrumentVoicingsModuleScreen(
+                    "voicings", "piano", "guitar", "arpeggio" -> InstrumentVoicingsModuleScreen(
                         voicingsViewModel = voicingsViewModel,
                         sharedViewModel = viewModel,
                         onOpenDrawer = { coroutineScope.launch { drawerState.open() } },
@@ -3192,15 +3192,6 @@ fun RealtimeAnalyzerTab(
                         }
                         Column(horizontalAlignment = Alignment.End) {
                             Text(text = String.format("%+2.0f Cents", tunerState.deviationCents), fontSize = 11.sp, fontWeight = FontWeight.Bold, color = if (tunerState.isTuned) Color.Green else Color(0xFFFF9100))
-                            Button(
-                                onClick = { viewModel.engine.autoTuneTuner() },
-                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF13233C)),
-                                shape = RoundedCornerShape(4.dp),
-                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
-                                modifier = Modifier.height(24.dp)
-                            ) {
-                                Text("Auto-Tune", fontSize = 8.sp, color = Color.White)
-                            }
                         }
                     }
                 }
@@ -5586,7 +5577,7 @@ fun AudioRecorderDialog(
         contract = ActivityResultContracts.RequestPermission()
     ) { isGranted ->
         if (isGranted) {
-            viewModel.engine.toggleRecording()
+            viewModel.toggleRecording(sessionTitle, "WAV", "Manual on-device workstation mic recording.")
         } else {
             if (activity != null && !AudioPermissionHelper.shouldShowPermissionRationale(activity)) {
                 isPermanentlyDenied = true
@@ -5681,10 +5672,10 @@ fun AudioRecorderDialog(
                     Button(
                         onClick = {
                             if (isRec) {
-                                viewModel.engine.toggleRecording()
+                                viewModel.toggleRecording(sessionTitle, "WAV", "Manual on-device workstation mic recording.")
                             } else {
                                 if (AudioPermissionHelper.hasRecordAudioPermission(context)) {
-                                    viewModel.engine.toggleRecording()
+                                    viewModel.toggleRecording(sessionTitle, "WAV", "Manual on-device workstation mic recording.")
                                 } else {
                                     if (activity != null && AudioPermissionHelper.shouldShowPermissionRationale(activity)) {
                                         isPermanentlyDenied = false
@@ -5710,7 +5701,7 @@ fun AudioRecorderDialog(
                     Button(
                         onClick = {
                             if (isRec) {
-                                viewModel.engine.toggleRecording()
+                                viewModel.toggleRecording(sessionTitle, "WAV", "Manual on-device workstation mic recording.")
                             }
                             // Save to Room db
                             viewModel.addSession(

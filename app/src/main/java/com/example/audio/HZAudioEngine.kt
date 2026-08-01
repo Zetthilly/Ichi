@@ -90,7 +90,7 @@ class HZAudioEngine(
     private val _loopEndMs = MutableStateFlow(0L)
     val loopEndMs: StateFlow<Long> = _loopEndMs.asStateFlow()
 
-    // Loaded Audio File Metadata
+    fun getActivePcmSamples(): FloatArray? = activePcmSamples
     private val _loadedMetadata = MutableStateFlow<ImportedAudioMetadata?>(null)
     val loadedMetadata: StateFlow<ImportedAudioMetadata?> = _loadedMetadata.asStateFlow()
 

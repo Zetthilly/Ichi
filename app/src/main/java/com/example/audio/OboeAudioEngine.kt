@@ -5,6 +5,7 @@ import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.util.Log
+import androidx.annotation.Keep
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -181,5 +182,3 @@ class OboeAudioEngine(
         private const val TAG = "OboeAudioEngine"
     }
 }
-
-annotation class Keep

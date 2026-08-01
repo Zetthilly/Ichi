@@ -7,7 +7,9 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
 import com.example.ui.MainWorkstationApp
 import com.example.viewmodel.WorkstationViewModel
+import dagger.hilt.android.AndroidEntryPoint
 
+@AndroidEntryPoint
 class MainActivity : ComponentActivity() {
     private val workstationViewModel: WorkstationViewModel by viewModels()
 

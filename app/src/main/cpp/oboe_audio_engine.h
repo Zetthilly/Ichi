@@ -23,7 +23,7 @@ public:
 private:
     JavaVM* javaVM;
     jobject callbackObj;
-    jmethodMethodId onBufferMethodId;
+    jmethodID onBufferMethodId;
 };
 
 #endif // OBOE_AUDIO_ENGINE_H

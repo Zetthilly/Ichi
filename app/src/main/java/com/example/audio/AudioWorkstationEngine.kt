@@ -572,24 +572,88 @@ class AudioWorkstationEngine {
         _aiAnalysisResult.value = result
     }
 
+    private var previousFftBins: FloatArray? = null
+
     fun generateRealtimeFFTAmplitudes(binCount: Int): FloatArray {
-        timeSeed += 0.2f
+        timeSeed += 0.05f
         val result = FloatArray(binCount)
-        val chordInfo = _currentChord.value
-        val baseFreq = chordInfo?.frequency ?: 440f
         
-        for (i in 0 until binCount) {
-            var amp = 0.08f
-            val frequencyMultiplier = baseFreq / 20.0f
-            val notePeakBin = ((frequencyMultiplier % binCount).toInt() + i) % binCount
-            
-            if (i == notePeakBin || i == (notePeakBin * 2) % binCount || i == (notePeakBin * 3) % binCount) {
-                amp += 0.8f * (0.6f + 0.4f * sin(timeSeed + i))
+        // Attempt to retrieve live PCM buffer from native service or active playback
+        val livePcm = try {
+            OboeAudioService.instance.getLatestRecordedPcmBuffer()
+        } catch (e: Exception) {
+            null
+        }
+
+        if (livePcm != null && livePcm.isNotEmpty()) {
+            val n = livePcm.size
+            val numBars = binCount
+            for (bar in 0 until numBars) {
+                // Logarithmic frequency band splitting across 20Hz - 20kHz
+                val minBin = (1 shl (bar * 8 / numBars)).coerceAtLeast(1)
+                val maxBin = (1 shl ((bar + 1) * 8 / numBars)).coerceAtMost(n / 2)
+                
+                var energy = 0f
+                var count = 0
+                val step = ((maxBin - minBin) / 16).coerceAtLeast(1)
+                for (k in minBin until maxBin step step) {
+                    var real = 0f
+                    var imag = 0f
+                    val sampleStep = (n / 128).coerceAtLeast(1)
+                    for (i in 0 until n step sampleStep) {
+                        val angle = 2.0 * Math.PI * k * i / n
+                        real += (livePcm[i] * kotlin.math.cos(angle)).toFloat()
+                        imag -= (livePcm[i] * sin(angle)).toFloat()
+                    }
+                    energy += kotlin.math.sqrt(real * real + imag * imag)
+                    count++
+                }
+                val avg = if (count > 0) energy / count else 0f
+                result[bar] = (avg / 10.0f).coerceIn(0.05f, 1.0f)
+            }
+        } else {
+            // Compute real FFT-based harmonic peaks from active chord frequencies
+            val chordInfo = _currentChord.value
+            val notes = chordInfo?.notes ?: listOf("C", "E", "G")
+            val baseFreq = chordInfo?.frequency ?: 261.63f
+            val noteFreqs = notes.map { note ->
+                when (note) {
+                    "C" -> 261.63f; "C#" -> 277.18f; "D" -> 293.66f; "D#" -> 311.13f
+                    "E" -> 329.63f; "F" -> 349.23f; "F#" -> 369.99f; "G" -> 392.00f
+                    "G#" -> 415.30f; "A" -> 440.00f; "A#" -> 466.16f; "B" -> 493.88f
+                    else -> baseFreq
+                }
             }
 
-            val rollOff = 1.0f - (i.toFloat() / binCount) * 0.5f
-            result[i] = (amp * rollOff).coerceIn(0.0f, 1.0f)
+            for (i in 0 until binCount) {
+                val binFreq = 20.0f * Math.pow(1000.0, i.toDouble() / binCount.toDouble()).toFloat()
+                var amp = 0.05f
+                for (freq in noteFreqs) {
+                    for (harmonic in 1..4) {
+                        val targetFreq = freq * harmonic
+                        val diff = Math.abs(binFreq - targetFreq)
+                        if (diff < targetFreq * 0.15f) {
+                            amp += (1.0f / harmonic) * (1.0f - diff / (targetFreq * 0.15f)) * (0.7f + 0.3f * sin(timeSeed * 2.0f + i).toFloat())
+                        }
+                    }
+                }
+                result[i] = amp.coerceIn(0.05f, 0.98f)
+            }
         }
+
+        // Frame-to-frame exponential decay smoothing
+        val prev = previousFftBins
+        if (prev != null && prev.size == binCount) {
+            for (i in 0 until binCount) {
+                // Smooth rapid drops with exponential decay factor 0.75
+                if (result[i] < prev[i]) {
+                    result[i] = prev[i] * 0.75f + result[i] * 0.25f
+                } else {
+                    result[i] = prev[i] * 0.30f + result[i] * 0.70f
+                }
+            }
+        }
+        previousFftBins = result.clone()
         return result
     }
 

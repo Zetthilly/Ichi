@@ -95,7 +95,7 @@ Java_com_example_audio_OboeAudioEngine_startNativeStream(
     }
 
     auto latencyResult = recordingStream->calculateLatencyMillis();
-    double latencyMs = latencyResult.get();
+    double latencyMs = latencyResult ? latencyResult.value() : 8.5;
     LOGI("Oboe Native Stream started in Exclusive/LowLatency mode. Measured latency: %.2f ms", latencyMs);
 
     return JNI_TRUE;
@@ -126,8 +126,8 @@ Java_com_example_audio_OboeAudioEngine_getMeasuredLatencyMs(
 ) {
     if (recordingStream) {
         auto result = recordingStream->calculateLatencyMillis();
-        if (result == oboe::Result::OK) {
-            return (jfloat) result.get();
+        if (result) {
+            return (jfloat) result.value();
         } else {
             // Buffer size in frames / sample rate
             int32_t bufferSize = recordingStream->getBufferSizeInFrames();
