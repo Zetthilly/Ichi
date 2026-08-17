@@ -160,15 +160,13 @@ fun ExportCenterScreen(
                     color = Color(0xFF94A3B8)
                 )
 
-                // Audio Format Selector (WAV, FLAC, MP3, AAC)
+                // Audio Format Selector (WAV, AAC)
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     val audioFormats = listOf(
                         AdvancedExportEngine.ExportFormat.WAV,
-                        AdvancedExportEngine.ExportFormat.FLAC,
-                        AdvancedExportEngine.ExportFormat.MP3,
                         AdvancedExportEngine.ExportFormat.AAC
                     )
                     audioFormats.forEach { fmt ->

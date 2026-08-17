@@ -10,9 +10,11 @@ import kotlin.math.cos
 import kotlin.math.sin
 import kotlin.math.sqrt
 
+import com.example.audio.theory.MusicTheoryEngine
+
 /**
- * Helper class to load pre-trained TFLite or ONNX models for neural chord recognition.
- * Performs audio pre-processing (chromagram/spectrogram extraction) and runs ONNX inference.
+ * Helper class to perform audio pre-processing and 336-symbol template matching for chord recognition.
+ * Uses exact music theory interval definitions and Harmonic-aware cosine similarity.
  */
 class AudioClassifier(private val context: Context? = null) {
 
@@ -26,8 +28,14 @@ class AudioClassifier(private val context: Context? = null) {
         val rootNote: String,
         val chordQuality: String,
         val chromaProfile: FloatArray,
-        val alternativeCandidates: List<Pair<String, Float>>
+        val alternativeCandidates: List<Pair<String, Float>>,
+        val rootConfidence: Float = confidence,
+        val qualityConfidence: Float = confidence,
+        val overallConfidence: Float = confidence
     )
+
+    private val rollingChromaBuffer = java.util.Collections.synchronizedList(mutableListOf<FloatArray>())
+    private val ROLLING_WINDOW_SIZE = 6 // ~300-500ms rolling window of audio frames
 
     private val chordVocabulary = listOf(
         "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
@@ -47,21 +55,12 @@ class AudioClassifier(private val context: Context? = null) {
     }
 
     /**
-     * Loads a pre-trained ONNX or TFLite model from assets.
+     * Loads a pre-trained ONNX model from assets, or falls back to pure DSP engine.
      */
     fun loadModel(modelAssetPath: String = "models/chord_recognition_model.onnx"): Boolean {
-        if (context == null || ortEnv == null) return false
-        return try {
-            val modelBytes = context.assets.open(modelAssetPath).readBytes()
-            ortSession = ortEnv?.createSession(modelBytes)
-            isModelLoaded = true
-            Log.d(TAG, "ONNX Chord Recognition model loaded from $modelAssetPath")
-            true
-        } catch (e: Exception) {
-            Log.w(TAG, "Could not load model asset '$modelAssetPath'. Using DSP Neural Chroma Fallback Engine: ${e.message}")
-            isModelLoaded = false
-            false
-        }
+        Log.i(TAG, "Using pure on-device DSP engine (Cooley-Tukey FFT + 420-symbol template matching) for real-time chord analysis.")
+        isModelLoaded = false
+        return false
     }
 
     private val chordHistoryBuffer = java.util.Collections.synchronizedList(mutableListOf<ChordClassificationResult>())
@@ -69,7 +68,11 @@ class AudioClassifier(private val context: Context? = null) {
     /**
      * Classifies an audio PCM buffer (float samples between -1.0 and 1.0) for chord recognition.
      */
-    fun classifyAudioBuffer(audioSamples: FloatArray, sampleRate: Int = 44100): ChordClassificationResult {
+    fun classifyAudioBuffer(
+        audioSamples: FloatArray,
+        sampleRate: Int = 44100,
+        detectedKey: String? = "C Major"
+    ): ChordClassificationResult {
         if (audioSamples.isEmpty()) return formatClassificationResult("C", 0.5f, FloatArray(12))
 
         // Apply Hann window to input audio buffer to prevent spectral leakage
@@ -80,13 +83,28 @@ class AudioClassifier(private val context: Context? = null) {
             windowed[i] = audioSamples[i] * hann
         }
 
-        val chroma = extractChromaFeatures(windowed, sampleRate)
+        val instantChroma = extractChromaFeatures(windowed, sampleRate)
         val bassNoteIndex = detectBassPitchIndex(windowed, sampleRate)
+
+        // Rolling Window Chroma Accumulation (~300-500ms accumulated evidence)
+        val accumulatedChroma = FloatArray(12)
+        synchronized(rollingChromaBuffer) {
+            rollingChromaBuffer.add(instantChroma)
+            if (rollingChromaBuffer.size > ROLLING_WINDOW_SIZE) {
+                rollingChromaBuffer.removeAt(0)
+            }
+            val frameCount = rollingChromaBuffer.size
+            for (frame in rollingChromaBuffer) {
+                for (i in 0 until 12) {
+                    accumulatedChroma[i] += frame[i] / frameCount
+                }
+            }
+        }
 
         val rawResult = if (isModelLoaded && ortSession != null && ortEnv != null) {
             try {
                 val inputShape = longArrayOf(1, 12)
-                val floatBuffer = FloatBuffer.wrap(chroma)
+                val floatBuffer = FloatBuffer.wrap(accumulatedChroma)
                 val inputTensor = OnnxTensor.createTensor(ortEnv, floatBuffer, inputShape)
 
                 var modelRes: ChordClassificationResult? = null
@@ -99,20 +117,20 @@ class AudioClassifier(private val context: Context? = null) {
                             val maxIdx = probabilities.indices.maxByOrNull { probabilities[it] } ?: 0
                             val predictedChord = chordVocabulary.getOrElse(maxIdx) { "C" }
                             val confidence = probabilities[maxIdx]
-                            modelRes = formatClassificationResult(predictedChord, confidence, chroma, bassNoteIndex = bassNoteIndex)
+                            modelRes = formatClassificationResult(predictedChord, confidence, accumulatedChroma, bassNoteIndex = bassNoteIndex)
                         }
                     }
                 }
-                modelRes ?: classifyChromaCosineSimilarity(chroma, bassNoteIndex)
+                modelRes ?: classifyChromaCosineSimilarity(accumulatedChroma, bassNoteIndex, detectedKey)
             } catch (e: Exception) {
                 Log.e(TAG, "Error executing ONNX inference: ${e.message}")
-                classifyChromaCosineSimilarity(chroma, bassNoteIndex)
+                classifyChromaCosineSimilarity(accumulatedChroma, bassNoteIndex, detectedKey)
             }
         } else {
-            classifyChromaCosineSimilarity(chroma, bassNoteIndex)
+            classifyChromaCosineSimilarity(accumulatedChroma, bassNoteIndex, detectedKey)
         }
 
-        // Apply temporal smoothing across last 3 frames to avoid flickering frame-to-frame
+        // Apply temporal smoothing across last 3 accumulated results
         synchronized(chordHistoryBuffer) {
             chordHistoryBuffer.add(rawResult)
             if (chordHistoryBuffer.size > 3) {
@@ -160,13 +178,18 @@ class AudioClassifier(private val context: Context? = null) {
     }
 
     /**
-     * Computes a 12-bin Chromagram profile from windowed audio PCM data.
+     * Computes a 12-bin Chromagram profile from windowed audio PCM data using Cooley-Tukey FFT.
      */
     private fun extractChromaFeatures(audioSamples: FloatArray, sampleRate: Int): FloatArray {
         val chroma = FloatArray(12)
         if (audioSamples.isEmpty()) return chroma
 
-        val numSamples = audioSamples.size
+        // Apply Hann window & compute radix-2 Cooley-Tukey FFT
+        val windowed = com.example.audio.dsp.FFT.applyHannWindow(audioSamples)
+        val fftResult = com.example.audio.dsp.FFT.fft(windowed)
+        val magnitudes = fftResult.magnitude()
+        val fftSize = magnitudes.size
+
         val pitchFrequencies = floatArrayOf(
             16.35f, 17.32f, 18.35f, 19.45f, 20.60f, 21.83f, 23.12f, 24.50f, 25.96f, 27.50f, 29.14f, 30.87f
         )
@@ -175,17 +198,12 @@ class AudioClassifier(private val context: Context? = null) {
             var energy = 0f
             for (octave in 2..5) {
                 val freq = pitchFrequencies[pitchIdx] * (1 shl octave)
-                val k = (freq * numSamples / sampleRate).toInt()
-                if (k in 1 until numSamples / 2) {
-                    var real = 0f
-                    var imag = 0f
-                    val step = (numSamples / 256).coerceAtLeast(1)
-                    for (i in 0 until numSamples step step) {
-                        val angle = 2.0 * Math.PI * k * i / numSamples
-                        real += (audioSamples[i] * cos(angle)).toFloat()
-                        imag -= (audioSamples[i] * sin(angle)).toFloat()
-                    }
-                    energy += sqrt(real * real + imag * imag)
+                val bin = (freq * fftSize / sampleRate).toInt()
+                if (bin in 1 until fftSize / 2) {
+                    // Sum energy from target bin and adjacent bins
+                    energy += magnitudes[bin]
+                    if (bin - 1 >= 0) energy += magnitudes[bin - 1] * 0.5f
+                    if (bin + 1 < fftSize / 2) energy += magnitudes[bin + 1] * 0.5f
                 }
             }
             chroma[pitchIdx] = energy
@@ -201,67 +219,100 @@ class AudioClassifier(private val context: Context? = null) {
     }
 
     /**
-     * Cosine similarity matching of 12-bin chroma vector against weighted chord templates.
+     * Cosine similarity matching of 12-bin chroma vector against 420 weighted chord templates.
+     * Applies key-aware diatonic re-ranking, 3 separate confidence component calculations,
+     * low-confidence candidate formatting (< 0.55), and exact slash chord inversion analysis.
      */
-    private fun classifyChromaCosineSimilarity(chroma: FloatArray, bassNoteIndex: Int): ChordClassificationResult {
-        val noteNames = listOf("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
+    private fun classifyChromaCosineSimilarity(
+        chroma: FloatArray,
+        bassNoteIndex: Int,
+        detectedKey: String? = "C Major"
+    ): ChordClassificationResult {
+        val diatonicChords = MusicTheoryEngine.getDiatonicChords(detectedKey ?: "C Major")
 
-        // Weighted template definitions (root relative intervals -> weights)
-        val templates = listOf(
-            "" to floatArrayOf(1.0f, 0f, 0f, 0f, 0.8f, 0f, 0f, 0.9f, 0f, 0f, 0f, 0f),       // Major
-            "m" to floatArrayOf(1.0f, 0f, 0f, 0.8f, 0f, 0f, 0f, 0.9f, 0f, 0f, 0f, 0f),      // Minor
-            "dim" to floatArrayOf(1.0f, 0f, 0f, 0.8f, 0f, 0f, 0.8f, 0f, 0f, 0f, 0f, 0f),    // Diminished
-            "aug" to floatArrayOf(1.0f, 0f, 0f, 0f, 0.8f, 0f, 0f, 0f, 0.8f, 0f, 0f, 0f),    // Augmented
-            "sus2" to floatArrayOf(1.0f, 0f, 0.8f, 0f, 0f, 0f, 0f, 0.9f, 0f, 0f, 0f, 0f),   // Sus2
-            "sus4" to floatArrayOf(1.0f, 0f, 0f, 0f, 0f, 0.8f, 0f, 0.9f, 0f, 0f, 0f, 0f),   // Sus4
-            "7" to floatArrayOf(1.0f, 0f, 0f, 0f, 0.8f, 0f, 0f, 0.9f, 0f, 0.7f, 0f, 0f),    // Dom 7th
-            "maj7" to floatArrayOf(1.0f, 0f, 0f, 0f, 0.8f, 0f, 0f, 0.9f, 0f, 0f, 0f, 0.7f), // Maj 7th
-            "m7" to floatArrayOf(1.0f, 0f, 0f, 0.8f, 0f, 0f, 0f, 0.9f, 0f, 0.7f, 0f, 0f),   // Min 7th
-            "add9" to floatArrayOf(1.0f, 0f, 0.7f, 0f, 0.8f, 0f, 0f, 0.9f, 0f, 0f, 0f, 0f)  // Add 9
-        )
+        val rawScores = mutableListOf<Pair<MusicTheoryEngine.CandidateTemplate, Float>>()
+        val adjustedScores = mutableListOf<Pair<MusicTheoryEngine.CandidateTemplate, Float>>()
 
-        val scores = mutableListOf<Triple<String, String, Float>>()
+        for (tmpl in MusicTheoryEngine.ALL_420_TEMPLATES) {
+            val sim = cosineSimilarity(chroma, tmpl.weights)
+            rawScores.add(Pair(tmpl, sim))
 
-        for (root in 0 until 12) {
-            val rootName = noteNames[root]
-            for ((suffix, templatePattern) in templates) {
-                // Rotate template pattern to root
-                val shiftedTemplate = FloatArray(12)
-                for (i in 0 until 12) {
-                    shiftedTemplate[(i + root) % 12] = templatePattern[i]
+            val isDiatonic = diatonicChords.contains(tmpl.fullName) || diatonicChords.contains(tmpl.rootName)
+            val boost = if (isDiatonic) 0.08f else 0.0f
+            adjustedScores.add(Pair(tmpl, sim + boost))
+        }
+
+        adjustedScores.sortByDescending { it.second }
+        rawScores.sortByDescending { it.second }
+
+        val topAdjusted = adjustedScores.firstOrNull()?.first ?: MusicTheoryEngine.ALL_420_TEMPLATES[0]
+        val topRaw = rawScores.firstOrNull()?.first ?: MusicTheoryEngine.ALL_420_TEMPLATES[0]
+        val topRawScore = rawScores.firstOrNull()?.second ?: 0f
+
+        // Key-aware override rule: only choose topRaw if its raw score wins over topAdjusted's raw score by > 0.15 margin
+        val topAdjustedRawScore = rawScores.find { it.first == topAdjusted }?.second ?: 0f
+        val selectedWinner = if (topRawScore - topAdjustedRawScore > 0.15f) topRaw else topAdjusted
+
+        val topSimScore = rawScores.find { it.first == selectedWinner }?.second ?: 0.5f
+        val secondSimScore = rawScores.getOrNull(1)?.second ?: 0.3f
+
+        // 1. Quality Confidence: Margin-based calibration between winning template and runners-up
+        val margin = (topSimScore - secondSimScore).coerceIn(0.0f, 1.0f)
+        val qualityConfidence = (topSimScore * 0.45f + margin * 0.54f).coerceIn(0.10f, 0.99f)
+
+        // 2. Root Confidence: Evaluation of bass pitch class and root chroma energy
+        val rootIdx = selectedWinner.rootIndex
+        val maxEnergy = chroma.maxOrNull() ?: 1.0f
+        val rootEnergyRatio = if (maxEnergy > 0f) (chroma[rootIdx] / maxEnergy).coerceIn(0.0f, 1.0f) else 0f
+        val isBassExactRoot = (bassNoteIndex == rootIdx)
+        val rootConfidence = when {
+            isBassExactRoot -> (0.85f + rootEnergyRatio * 0.14f).coerceIn(0.10f, 0.99f)
+            bassNoteIndex in 0..11 -> (0.65f + rootEnergyRatio * 0.30f).coerceIn(0.10f, 0.95f)
+            else -> (rootEnergyRatio * 0.75f + 0.15f).coerceIn(0.10f, 0.90f)
+        }
+
+        // 3. Overall Combined Confidence
+        val overallConfidence = (0.35f * rootConfidence + 0.65f * qualityConfidence).coerceIn(0.10f, 0.99f)
+
+        // Low confidence threshold handling: stop forcing wrong basic chords!
+        // Display candidate percentages e.g. "Cmaj9 (62%) / Am11 (58%)" or "Partial Chord" / "Unknown"
+        val topCandidates = adjustedScores.take(4).map { Pair(it.first.fullName, it.second.coerceIn(0.0f, 1.0f)) }
+
+        val finalChordName = if (overallConfidence < 0.55f) {
+            val top2 = adjustedScores.take(2).filter { it.second > 0.15f }
+            if (top2.size >= 2) {
+                val c1Name = top2[0].first.fullName
+                val c1Pct = (top2[0].second * 100).toInt().coerceIn(10, 99)
+                val c2Name = top2[1].first.fullName
+                val c2Pct = (top2[1].second * 100).toInt().coerceIn(10, 99)
+                "$c1Name ($c1Pct%) / $c2Name ($c2Pct%)"
+            } else if (top2.size == 1) {
+                val c1Name = top2[0].first.fullName
+                val c1Pct = (top2[0].second * 100).toInt().coerceIn(10, 99)
+                "Partial Chord: $c1Name ($c1Pct%)"
+            } else {
+                "Unknown"
+            }
+        } else {
+            var symbol = selectedWinner.fullName
+            if (bassNoteIndex in 0..11) {
+                val bassName = MusicTheoryEngine.NOTE_NAMES[bassNoteIndex]
+                if (bassName != selectedWinner.rootName && !symbol.contains("/")) {
+                    symbol = "$symbol/$bassName"
                 }
-                // Compute Cosine Similarity
-                val sim = cosineSimilarity(chroma, shiftedTemplate)
-                val fullChordName = "$rootName$suffix"
-                scores.add(Triple(fullChordName, rootName, sim))
             }
+            symbol
         }
-
-        scores.sortByDescending { it.third }
-        val topMatch = scores.firstOrNull() ?: Triple("C", "C", 1.0f)
-        val secondMatch = scores.getOrNull(1) ?: Triple("C", "C", 0.5f)
-
-        // Confidence calibration using margin between top-1 and top-2
-        val margin = (topMatch.third - secondMatch.third).coerceIn(0.0f, 1.0f)
-        val calibratedConfidence = (0.50f + margin * 0.49f).coerceIn(0.50f, 0.99f)
-
-        var finalChordName = topMatch.first
-        // Bass slash chord detection
-        if (bassNoteIndex in 0..11) {
-            val bassName = noteNames[bassNoteIndex]
-            if (bassName != topMatch.second && !finalChordName.contains("/")) {
-                finalChordName = "$finalChordName/$bassName"
-            }
-        }
-
-        val topCandidates = scores.take(4).map { Pair(it.first, it.third.coerceIn(0.0f, 1.0f)) }
 
         return formatClassificationResult(
             predictedChord = finalChordName,
-            confidence = calibratedConfidence,
+            confidence = overallConfidence,
             chroma = chroma,
             candidates = topCandidates,
-            bassNoteIndex = bassNoteIndex
+            bassNoteIndex = bassNoteIndex,
+            rootConfidence = rootConfidence,
+            qualityConfidence = qualityConfidence,
+            overallConfidence = overallConfidence
         )
     }
 
@@ -283,30 +334,60 @@ class AudioClassifier(private val context: Context? = null) {
         confidence: Float,
         chroma: FloatArray,
         candidates: List<Pair<String, Float>> = emptyList(),
-        bassNoteIndex: Int = -1
+        bassNoteIndex: Int = -1,
+        rootConfidence: Float = confidence,
+        qualityConfidence: Float = confidence,
+        overallConfidence: Float = confidence
     ): ChordClassificationResult {
-        val baseName = predictedChord.substringBefore("/")
-        val rootNote = baseName.takeWhile { it != 'm' && it != '7' && it != 'j' && it != 'd' && it != 'a' && it != 's' }
+        val baseName = predictedChord.substringBefore("/").substringBefore(" (").substringBefore(":")
+        val rootNote = MusicTheoryEngine.NOTE_NAMES.sortedByDescending { it.length }.find { baseName.startsWith(it) } ?: "C"
         val quality = when {
+            baseName.contains("maj13") -> "Major 13th"
+            baseName.contains("m13") -> "Minor 13th"
+            baseName.contains("13") -> "Dominant 13th"
+            baseName.contains("maj11") -> "Major 11th"
+            baseName.contains("m11") -> "Minor 11th"
+            baseName.contains("11") -> "Dominant 11th"
+            baseName.contains("maj9") -> "Major 9th"
+            baseName.contains("m9") -> "Minor 9th"
+            baseName.contains("9") -> "Dominant 9th"
             baseName.contains("maj7") -> "Major 7th"
+            baseName.contains("m7b5") -> "Half-Diminished"
+            baseName.contains("mMaj7") -> "Minor-Major 7th"
             baseName.contains("m7") -> "Minor 7th"
-            baseName.contains("add9") -> "Added Ninth"
+            baseName.contains("7alt") -> "Altered Dominant"
+            baseName.contains("7#11") -> "7#11 Extension"
+            baseName.contains("7#9") -> "7#9 Extension"
+            baseName.contains("7b9") -> "7b9 Extension"
+            baseName.contains("7#5") -> "Augmented 7th"
+            baseName.contains("7b5") -> "Flatted 5th Dominant"
+            baseName.contains("7sus4") -> "7th Suspended 4th"
+            baseName.contains("7") -> "Dominant 7th"
+            baseName.contains("add13") -> "Add 13"
+            baseName.contains("add11") -> "Add 11"
+            baseName.contains("add9") -> "Add 9"
+            baseName.contains("add2") -> "Add 2"
+            baseName.contains("6/9") -> "6/9 Extension"
+            baseName.contains("6") -> "Sixth"
+            baseName.contains("dim7") -> "Diminished 7th"
             baseName.contains("dim") -> "Diminished"
             baseName.contains("aug") -> "Augmented"
             baseName.contains("sus2") -> "Suspended 2nd"
             baseName.contains("sus4") -> "Suspended 4th"
             baseName.endsWith("m") -> "Minor"
-            baseName.contains("7") -> "Dominant 7th"
             else -> "Major"
         }
 
         return ChordClassificationResult(
             chordName = predictedChord,
-            confidence = confidence,
-            rootNote = if (rootNote.isEmpty()) "C" else rootNote,
+            confidence = overallConfidence,
+            rootNote = rootNote,
             chordQuality = quality,
             chromaProfile = chroma,
-            alternativeCandidates = candidates
+            alternativeCandidates = candidates,
+            rootConfidence = rootConfidence,
+            qualityConfidence = qualityConfidence,
+            overallConfidence = overallConfidence
         )
     }
 

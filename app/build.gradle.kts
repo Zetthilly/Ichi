@@ -1,5 +1,6 @@
 plugins {
   alias(libs.plugins.android.application)
+  alias(libs.plugins.kotlin.android)
   alias(libs.plugins.kotlin.compose)
   alias(libs.plugins.google.devtools.ksp)
   alias(libs.plugins.hilt)
@@ -19,6 +20,7 @@ android {
     versionName = "1.0"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    ndkVersion = "27.0.12077973"
 
     externalNativeBuild {
       cmake {
@@ -56,8 +58,11 @@ android {
     }
   }
   compileOptions {
-    sourceCompatibility = JavaVersion.VERSION_11
-    targetCompatibility = JavaVersion.VERSION_11
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+  }
+  kotlinOptions {
+    jvmTarget = "17"
   }
   buildFeatures {
     compose = true
@@ -138,37 +143,5 @@ dependencies {
   implementation(libs.media3.exoplayer)
   implementation(libs.media3.ui)
   implementation(libs.media3.session)
-}
-
-abstract class VerifyOnnxModelsTask : DefaultTask() {
-    @get:OutputDirectory
-    abstract val modelsDir: DirectoryProperty
-
-    @TaskAction
-    fun verifyModels() {
-        val dir = modelsDir.get().asFile
-        if (!dir.exists()) {
-            dir.mkdirs()
-        }
-        val requiredModels = listOf("chord_recognition_model.onnx", "stem_separation_model.onnx")
-        requiredModels.forEach { modelName ->
-            val modelFile = File(dir, modelName)
-            if (!modelFile.exists() || modelFile.length() == 0L) {
-                logger.lifecycle("[ONNX Model Verification] $modelName missing or empty. Generating default ONNX model asset...")
-                modelFile.writeBytes(byteArrayOf(0x08, 0x07, 0x12, 0x05) + "onnx:".toByteArray() + modelName.toByteArray() + ByteArray(1024))
-            }
-            logger.lifecycle("[ONNX Model Verification] Verified $modelName (${modelFile.length()} bytes)")
-        }
-    }
-}
-
-val verifyAndPrepareOnnxModels = tasks.register<VerifyOnnxModelsTask>("verifyAndPrepareOnnxModels") {
-    description = "Verifies and ensures that chord recognition and stem separation ONNX models are present in assets/models/"
-    group = "verification"
-    modelsDir.set(layout.projectDirectory.dir("src/main/assets/models"))
-}
-
-tasks.named("preBuild") {
-    dependsOn(verifyAndPrepareOnnxModels)
 }
 

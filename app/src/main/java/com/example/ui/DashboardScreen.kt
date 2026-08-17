@@ -3724,6 +3724,22 @@ fun RealtimePlaybackChordTimeline(viewModel: WorkstationViewModel) {
                             fontWeight = FontWeight.Black,
                             color = Color(0xFFD4AF37)
                         )
+                        if (chord.description.isNotEmpty()) {
+                            Text(
+                                text = chord.description,
+                                fontSize = 9.sp,
+                                color = Color(0xFF38BDF8),
+                                fontWeight = FontWeight.Medium
+                            )
+                        }
+                        if (chord.suggestedSubstitutions.isNotEmpty()) {
+                            Text(
+                                text = "Substitutions: " + chord.suggestedSubstitutions.joinToString(" • "),
+                                fontSize = 8.5.sp,
+                                color = Color(0xFFA855F7),
+                                fontWeight = FontWeight.Normal
+                            )
+                        }
                         Spacer(modifier = Modifier.height(6.dp))
                         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                             Column {
@@ -3731,12 +3747,16 @@ fun RealtimePlaybackChordTimeline(viewModel: WorkstationViewModel) {
                                 Text(text = chord.formula, fontSize = 9.sp, fontWeight = FontWeight.Bold, color = Color.White)
                             }
                             Column {
-                                Text(text = "ROOT", fontSize = 7.sp, color = Color(0xFF64748B))
-                                Text(text = chord.root, fontSize = 9.sp, fontWeight = FontWeight.Bold, color = Color(0xFF00E5FF))
+                                Text(text = "ROOT CONF", fontSize = 7.sp, color = Color(0xFF64748B))
+                                Text(text = String.format("%.0f%%", chord.rootConfidence * 100), fontSize = 9.sp, fontWeight = FontWeight.Bold, color = Color(0xFF00E5FF))
                             }
                             Column {
-                                Text(text = "CONFIDENCE", fontSize = 7.sp, color = Color(0xFF64748B))
-                                Text(text = String.format("%.0f%%", chord.confidence * 100), fontSize = 9.sp, fontWeight = FontWeight.Bold, color = Color(0xFF10B981))
+                                Text(text = "QUAL CONF", fontSize = 7.sp, color = Color(0xFF64748B))
+                                Text(text = String.format("%.0f%%", chord.qualityConfidence * 100), fontSize = 9.sp, fontWeight = FontWeight.Bold, color = Color(0xFFA855F7))
+                            }
+                            Column {
+                                Text(text = "OVERALL", fontSize = 7.sp, color = Color(0xFF64748B))
+                                Text(text = String.format("%.0f%%", chord.overallConfidence * 100), fontSize = 9.sp, fontWeight = FontWeight.Bold, color = Color(0xFF10B981))
                             }
                         }
                     }
@@ -4856,6 +4876,23 @@ fun StudioAudioSeparationTab(
                                 Spacer(modifier = Modifier.width(6.dp))
                                 Text("Export Separated Stems (.zip archive)", fontWeight = FontWeight.Bold, fontSize = 11.sp)
                             }
+                        }
+                    }
+                    is StemSeparationState.Error -> {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(Color(0xFF2C1014), RoundedCornerShape(10.dp))
+                                .border(1.dp, Color(0xFFEF5350), RoundedCornerShape(10.dp))
+                                .padding(16.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = state.message,
+                                color = Color(0xFFEF5350),
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold
+                            )
                         }
                     }
                 }

@@ -27,9 +27,7 @@ object AdvancedExportEngine {
 
     enum class ExportFormat(val extension: String, val displayName: String, val mimeType: String) {
         WAV("wav", "WAV Audio (Uncompressed)", "audio/wav"),
-        FLAC("flac", "FLAC Audio (Lossless)", "audio/flac"),
-        MP3("mp3", "MP3 Audio (Standard)", "audio/mp3"),
-        AAC("m4a", "AAC Audio (High Efficiency)", "audio/aac"),
+        AAC("m4a", "AAC Audio (High Efficiency)", "audio/mp4"),
         TXT("txt", "Text Document (.txt)", "text/plain"),
         CSV("csv", "Spreadsheet (.csv)", "text/csv"),
         JSON("json", "JSON Payload (.json)", "application/json"),
@@ -73,39 +71,46 @@ object AdvancedExportEngine {
         val fileName = "HZ_Stem_${safeStem}_${System.currentTimeMillis()}.${format.extension}"
         val exportFile = File(context.cacheDir, fileName)
 
-        // Generate synthetic musical audio if PCM buffer is null or empty
-        val samples = if (stemPcm != null && stemPcm.isNotEmpty()) {
-            stemPcm
-        } else {
-            val numSamples = sampleRate * 5 // 5 seconds default
-            FloatArray(numSamples) { i ->
-                val freq = when (stemName.lowercase()) {
-                    "bass" -> 110.0
-                    "vocals" -> 440.0
-                    "guitar" -> 330.0
-                    "drums" -> if ((i % (sampleRate / 2)) < sampleRate / 20) 60.0 else 0.0
-                    else -> 261.63
-                }
-                (0.3 * kotlin.math.sin(2.0 * Math.PI * freq * i / sampleRate)).toFloat()
-            }
+        if (stemPcm == null || stemPcm.isEmpty()) {
+            return ExportResult(
+                file = exportFile,
+                format = format,
+                title = "Stem: $stemName",
+                sizeBytes = 0,
+                statusMessage = "Export failed: No audio loaded — import or record a file first."
+            )
         }
 
-        FileOutputStream(exportFile).use { out ->
-            val durationSec = samples.size.toDouble() / sampleRate
-            if (format == ExportFormat.WAV || format == ExportFormat.FLAC || format == ExportFormat.MP3 || format == ExportFormat.AAC) {
-                // Write 44-byte WAV header + converted 16-bit PCM shorts
-                val pcmDataSize = samples.size * 2 // 16-bit mono
-                val header = buildPcmWavHeader(sampleRate, 1, pcmDataSize)
-                out.write(header)
+        val samples = stemPcm
+        val durationSec = samples.size.toDouble() / sampleRate
 
-                val byteBuffer = java.nio.ByteBuffer.allocate(pcmDataSize)
-                byteBuffer.order(java.nio.ByteOrder.LITTLE_ENDIAN)
-                for (sample in samples) {
-                    val s = (sample.coerceIn(-1.0f, 1.0f) * 32767.0f).toInt().toShort()
-                    byteBuffer.putShort(s)
+        if (format == ExportFormat.AAC) {
+            try {
+                encodePcmToAacM4a(samples, sampleRate, exportFile)
+            } catch (e: Exception) {
+                // Fallback to WAV if device MediaCodec fails
+                FileOutputStream(exportFile).use { out ->
+                    val pcmDataSize = samples.size * 2
+                    out.write(buildPcmWavHeader(sampleRate, 1, pcmDataSize))
+                    val byteBuffer = java.nio.ByteBuffer.allocate(pcmDataSize).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                    for (s in samples) {
+                        byteBuffer.putShort((s.coerceIn(-1.0f, 1.0f) * 32767.0f).toInt().toShort())
+                    }
+                    out.write(byteBuffer.array())
+                }
+            }
+        } else if (format == ExportFormat.WAV) {
+            FileOutputStream(exportFile).use { out ->
+                val pcmDataSize = samples.size * 2
+                out.write(buildPcmWavHeader(sampleRate, 1, pcmDataSize))
+                val byteBuffer = java.nio.ByteBuffer.allocate(pcmDataSize).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                for (s in samples) {
+                    byteBuffer.putShort((s.coerceIn(-1.0f, 1.0f) * 32767.0f).toInt().toShort())
                 }
                 out.write(byteBuffer.array())
-            } else {
+            }
+        } else {
+            FileOutputStream(exportFile).use { out ->
                 val header = "# HZ CHORD AI STEM EXPORT\nStem: $stemName\nSample Rate: $sampleRate Hz\nDuration: %.2fs\nFormat: ${format.displayName}\nSamples: ${samples.size}\n".format(durationSec)
                 out.write(header.toByteArray())
             }
@@ -117,6 +122,87 @@ object AdvancedExportEngine {
             title = "Stem: $stemName",
             statusMessage = "Exported $stemName (${samples.size} PCM samples) as ${format.displayName}"
         )
+    }
+
+    private fun encodePcmToAacM4a(samples: FloatArray, sampleRate: Int, outputFile: File) {
+        val mime = "audio/mp4a-latm"
+        val channelCount = 1
+        val bitRate = 128000
+
+        val format = android.media.MediaFormat.createAudioFormat(mime, sampleRate, channelCount).apply {
+            setInteger(android.media.MediaFormat.KEY_AAC_PROFILE, android.media.MediaCodecInfo.CodecProfileLevel.AACObjectLC)
+            setInteger(android.media.MediaFormat.KEY_BIT_RATE, bitRate)
+            setInteger(android.media.MediaFormat.KEY_MAX_INPUT_SIZE, 16384)
+        }
+
+        val codec = android.media.MediaCodec.createEncoderByType(mime)
+        codec.configure(format, null, null, android.media.MediaCodec.CONFIGURE_FLAG_ENCODE)
+        codec.start()
+
+        val muxer = android.media.MediaMuxer(outputFile.absolutePath, android.media.MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+        var trackIndex = -1
+        var muxerStarted = false
+
+        val bufferInfo = android.media.MediaCodec.BufferInfo()
+        val pcmShorts = ShortArray(samples.size) { i -> (samples[i].coerceIn(-1.0f, 1.0f) * 32767.0f).toInt().toShort() }
+
+        var sampleIndex = 0
+        val totalSamples = pcmShorts.size
+        var isInputEOS = false
+        var isOutputEOS = false
+
+        while (!isOutputEOS) {
+            if (!isInputEOS) {
+                val inBufIdx = codec.dequeueInputBuffer(10000L)
+                if (inBufIdx >= 0) {
+                    val inputBuf = codec.getInputBuffer(inBufIdx)
+                    if (inputBuf != null) {
+                        inputBuf.clear()
+                        val capacityShorts = inputBuf.capacity() / 2
+                        val remainingShorts = totalSamples - sampleIndex
+                        val shortsToPut = capacityShorts.coerceAtMost(remainingShorts)
+
+                        if (shortsToPut > 0) {
+                            for (k in 0 until shortsToPut) {
+                                inputBuf.putShort(pcmShorts[sampleIndex + k])
+                            }
+                            val presentationTimeUs = (sampleIndex.toDouble() / sampleRate * 1_000_000).toLong()
+                            codec.queueInputBuffer(inBufIdx, 0, shortsToPut * 2, presentationTimeUs, 0)
+                            sampleIndex += shortsToPut
+                        } else {
+                            isInputEOS = true
+                            codec.queueInputBuffer(inBufIdx, 0, 0, 0L, android.media.MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                        }
+                    }
+                }
+            }
+
+            val outBufIdx = codec.dequeueOutputBuffer(bufferInfo, 10000L)
+            if (outBufIdx == android.media.MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                val newFormat = codec.outputFormat
+                trackIndex = muxer.addTrack(newFormat)
+                muxer.start()
+                muxerStarted = true
+            } else if (outBufIdx >= 0) {
+                val encodedData = codec.getOutputBuffer(outBufIdx)
+                if (encodedData != null && bufferInfo.size > 0 && muxerStarted) {
+                    encodedData.position(bufferInfo.offset)
+                    encodedData.limit(bufferInfo.offset + bufferInfo.size)
+                    muxer.writeSampleData(trackIndex, encodedData, bufferInfo)
+                }
+                codec.releaseOutputBuffer(outBufIdx, false)
+                if ((bufferInfo.flags and android.media.MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
+                    isOutputEOS = true
+                }
+            }
+        }
+
+        try { codec.stop() } catch (_: Exception) {}
+        codec.release()
+        if (muxerStarted) {
+            try { muxer.stop() } catch (_: Exception) {}
+        }
+        muxer.release()
     }
 
     private fun buildPcmWavHeader(sampleRate: Int, channels: Int, dataSize: Int): ByteArray {

@@ -34,6 +34,7 @@ class OboeAudioEngine(
     private var audioClassifier: AudioClassifier? = null
     var onChordDetectedListener: ((AudioClassifier.ChordClassificationResult) -> Unit)? = null
     private var activeAudioCallback: ((FloatArray) -> Unit)? = null
+    private var lastRecordedPcm: FloatArray? = null
 
     private var isNativeLoaded = false
 
@@ -56,6 +57,7 @@ class OboeAudioEngine(
     @Keep
     fun onNativeAudioBuffer(buffer: FloatArray, size: Int) {
         val pcm = if (buffer.size == size) buffer else buffer.copyOf(size)
+        lastRecordedPcm = pcm
         activeAudioCallback?.invoke(pcm)
         audioClassifier?.let { classifier ->
             val result = classifier.classifyAudioBuffer(pcm, sampleRate)
@@ -129,6 +131,7 @@ class OboeAudioEngine(
                             floatBuffer[i] = shortBuffer[i] / 32768.0f
                         }
                         val pcm = floatBuffer.copyOf(readCount)
+                        lastRecordedPcm = pcm
                         onAudioBufferReceived?.invoke(pcm)
 
                         audioClassifier?.let { classifier ->
@@ -176,6 +179,10 @@ class OboeAudioEngine(
     fun release() {
         stopRecording()
         engineScope.cancel()
+    }
+
+    fun getLatestRecordedPcmBuffer(): FloatArray? {
+        return lastRecordedPcm
     }
 
     companion object {

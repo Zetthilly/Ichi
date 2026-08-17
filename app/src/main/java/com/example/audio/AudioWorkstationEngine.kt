@@ -21,6 +21,7 @@ sealed class StemSeparationState {
         val bassVolume: Float = 1.0f,
         val drumsVolume: Float = 1.0f
     ) : StemSeparationState()
+    data class Error(val message: String) : StemSeparationState()
 }
 
 // Real tuner note info
@@ -43,7 +44,10 @@ data class DetectedChordInfo(
     val frequency: Float,
     val type: String, // e.g., "Major", "Seventh", "Ext-Jazz", "Extended Voicing"
     val description: String,
-    val suggestedSubstitutions: List<String>
+    val suggestedSubstitutions: List<String>,
+    val rootConfidence: Float = confidence,
+    val qualityConfidence: Float = confidence,
+    val overallConfidence: Float = confidence
 )
 
 // Real-time scrolling chord timeline item representing historical occurrences
@@ -82,6 +86,15 @@ class AudioWorkstationEngine {
     // Specialized African Guitar styles
     private val _africanStyleLick = MutableStateFlow<String?>(null)
     val africanStyleLick: StateFlow<String?> = _africanStyleLick.asStateFlow()
+
+    private val _voiceLeading = MutableStateFlow<com.example.audio.theory.VoiceLeadingResult?>(null)
+    val voiceLeading: StateFlow<com.example.audio.theory.VoiceLeadingResult?> = _voiceLeading.asStateFlow()
+
+    private val _matchedProgression = MutableStateFlow<com.example.audio.theory.ProgressionMatchResult?>(null)
+    val matchedProgression: StateFlow<com.example.audio.theory.ProgressionMatchResult?> = _matchedProgression.asStateFlow()
+
+    private val _functionalAnalysis = MutableStateFlow<com.example.audio.theory.FunctionalAnalysisResult?>(null)
+    val functionalAnalysis: StateFlow<com.example.audio.theory.FunctionalAnalysisResult?> = _functionalAnalysis.asStateFlow()
 
     // Audio Tuner State
     private val _tunerState = MutableStateFlow(TuningNote("E2", 82.41f, 82.41f, 0f, true))
@@ -336,6 +349,9 @@ class AudioWorkstationEngine {
     fun setVocalEnhancementEnabled(enabled: Boolean) { _vocalEnhancementEnabled.value = enabled }
     fun setStemSeparationState(state: StemSeparationState) { _stemSeparation.value = state }
     fun setCurrentChord(chord: DetectedChordInfo?) { _currentChord.value = chord }
+    fun setVoiceLeading(vl: com.example.audio.theory.VoiceLeadingResult?) { _voiceLeading.value = vl }
+    fun setMatchedProgression(mp: com.example.audio.theory.ProgressionMatchResult?) { _matchedProgression.value = mp }
+    fun setFunctionalAnalysis(fa: com.example.audio.theory.FunctionalAnalysisResult?) { _functionalAnalysis.value = fa }
     fun setChordTimeline(timeline: List<TimelineChordEntry>) {
         _chordTimeline.value = timeline
         timelineStepCounter = (timeline.size + 1).coerceAtLeast(1)
@@ -603,7 +619,7 @@ class AudioWorkstationEngine {
                     for (i in 0 until n step sampleStep) {
                         val angle = 2.0 * Math.PI * k * i / n
                         real += (livePcm[i] * kotlin.math.cos(angle)).toFloat()
-                        imag -= (livePcm[i] * sin(angle)).toFloat()
+                        imag -= (livePcm[i] * kotlin.math.sin(angle)).toFloat()
                     }
                     energy += kotlin.math.sqrt(real * real + imag * imag)
                     count++

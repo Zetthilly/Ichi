@@ -166,4 +166,16 @@ class OboeAudioService private constructor() {
     fun getDirectSharedMemoryPointer(): String {
         return _metrics.value.sharedMemoryPointerHex
     }
+
+    fun getLatestRecordedPcmBuffer(): FloatArray? {
+        val buffer = sharedDirectPcmBuffer.duplicate()
+        buffer.rewind()
+        val numShorts = (buffer.remaining() / 2).coerceAtMost(4096)
+        if (numShorts <= 0) return null
+        val result = FloatArray(numShorts)
+        for (i in 0 until numShorts) {
+            result[i] = buffer.getShort() / 32768.0f
+        }
+        return result
+    }
 }

@@ -1040,6 +1040,9 @@ class WorkstationViewModel @Inject constructor(
                 if (transcription != null) {
                     val chord = transcription.chordInfo
                     engine.setCurrentChord(chord)
+                    engine.setVoiceLeading(transcription.voiceLeading)
+                    engine.setMatchedProgression(transcription.matchedProgression)
+                    engine.setFunctionalAnalysis(transcription.functionalAnalysis)
                     if (transcription.activeNotes.isNotEmpty()) {
                         feedPerformanceNotes(transcription.activeNotes, chord.name)
                     }
@@ -1594,13 +1597,20 @@ class WorkstationViewModel @Inject constructor(
         engine.simulateProgression(symbols)
     }
 
-    // Real Stem Separation running chunked STFT engine on real audio data
+    // Real Stem Separation running chunked HPSS engine on real audio data
     fun runStemSeparation(mode: String) {
         engine.startStemSeparation(mode)
         viewModelScope.launch {
             val realSamples = masterAudioEngine.getActivePcmSamples()
                 ?: oboeAudioEngine.getLatestRecordedPcmBuffer()
                 ?: FloatArray(0)
+
+            if (realSamples.isEmpty()) {
+                engine.setStemSeparationState(
+                    StemSeparationState.Error("No audio loaded — import or record a file first")
+                )
+                return@launch
+            }
 
             // Progress monitoring job
             val progressJob = launch {
@@ -1609,9 +1619,16 @@ class WorkstationViewModel @Inject constructor(
                 }
             }
 
-            // Execute real chunked STFT separation
-            masterAudioEngine.stemEngine.separateMasterPcm(realSamples, sampleRate = 44100, qualityMode = mode)
+            // Execute real chunked HPSS separation
+            val success = masterAudioEngine.stemEngine.separateMasterPcm(realSamples, sampleRate = 44100, qualityMode = mode)
             progressJob.cancel()
+
+            if (!success) {
+                engine.setStemSeparationState(
+                    StemSeparationState.Error("Stem separation failed: Audio buffer empty or unreadable")
+                )
+                return@launch
+            }
 
             engine.setStemSeparationState(
                 StemSeparationState.Success(
@@ -1619,9 +1636,9 @@ class WorkstationViewModel @Inject constructor(
                 )
             )
 
-            // Trigger grounded Gemini AI analysis with real audio parameters
-            val filename = uploadedFileName.value ?: "live_acoustic_session.wav"
-            val filesize = uploadedFileSize.value ?: "7.8 MB"
+            // Trigger grounded on-device report with real audio parameters
+            val filename = uploadedFileName.value ?: "recorded_session.wav"
+            val filesize = uploadedFileSize.value ?: "${"%.1f".format(realSamples.size * 2 / 1024.0 / 1024.0)} MB"
             val currentBpm = bpm.value
             val currentKey = globalKeySignature.value ?: "C Major"
             val chordList = chordTimeline.value.map { it.name }

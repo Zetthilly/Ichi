@@ -71,12 +71,17 @@ class RealStemSeparationEngine(
         qualityMode: String = "Balanced"
     ): Boolean = withContext(Dispatchers.Default) {
         if (_isSeparating.value) return@withContext false
+        if (masterSamples.isEmpty()) {
+            Log.w(TAG, "Cannot perform stem separation: Master PCM audio buffer is empty.")
+            _isSeparating.value = false
+            return@withContext false
+        }
         _isSeparating.value = true
         _separationProgress.value = 0.02f
 
         try {
-            val numSamples = if (masterSamples.isNotEmpty()) masterSamples.size else sampleRate * 10
-            val safeMaster = if (masterSamples.isNotEmpty()) masterSamples else generateSyntheticMasterPcm(numSamples, sampleRate)
+            val numSamples = masterSamples.size
+            val safeMaster = masterSamples
 
             // Setup chunking parameters (~8 second chunks with ~1 second overlap)
             val chunkSize = (sampleRate * 8).coerceAtMost(numSamples)
@@ -152,10 +157,10 @@ class RealStemSeparationEngine(
 
             _separationProgress.value = 1.0f
             _isSeparating.value = false
-            Log.d(TAG, "Completed real chunked STFT stem separation ($qualityMode) into 7 stems.")
+            Log.d(TAG, "Completed real HPSS + frequency-band stem separation ($qualityMode) into 7 stems.")
             return@withContext true
         } catch (e: Exception) {
-            Log.e(TAG, "Chunked stem separation error: ${e.message}", e)
+            Log.e(TAG, "Chunked HPSS stem separation error: ${e.message}", e)
             _isSeparating.value = false
             return@withContext false
         }
@@ -167,12 +172,27 @@ class RealStemSeparationEngine(
         windowSize: Int
     ): QuadrupleStems {
         val n = chunkInput.size
-        val vocals = filterBandpass(chunkInput, sampleRate, 300f, 3400f)
-        val drums = filterDrums(chunkInput, sampleRate)
-        val bass = filterLowpass(chunkInput, sampleRate, 250f)
+
+        // 1. Run real Harmonic-Percussive Source Separation (HPSS)
+        val hpss = com.example.audio.dsp.HarmonicPercussiveSeparator.separate(
+            pcmInput = chunkInput,
+            windowSize = windowSize,
+            hopSize = (windowSize / 4).coerceAtLeast(128)
+        )
+
+        // Drums are directly the isolated percussive component
+        val drums = hpss.percussiveWaveform
+        val harmonic = hpss.harmonicWaveform
+
+        // 2. Frequency-band separation applied to drum-free harmonic waveform
+        val vocals = filterBandpass(harmonic, sampleRate, 300f, 3400f)
+        val bass = filterLowpass(harmonic, sampleRate, 250f)
 
         val other = FloatArray(n) { i ->
-            (chunkInput[i] - (vocals[i] + drums[i] + bass[i]) * 0.35f).coerceIn(-1.0f, 1.0f)
+            val harmSample = if (i < harmonic.size) harmonic[i] else 0f
+            val vocSample = if (i < vocals.size) vocals[i] else 0f
+            val bassSample = if (i < bass.size) bass[i] else 0f
+            (harmSample - (vocSample + bassSample) * 0.4f).coerceIn(-1.0f, 1.0f)
         }
         return QuadrupleStems(vocals, drums, bass, other)
     }
@@ -223,37 +243,6 @@ class RealStemSeparationEngine(
         val kick = filterLowpass(input, sampleRate, 120f)
         val snareCymbal = filterHighpass(input, sampleRate, 3800f)
         return FloatArray(input.size) { i -> (kick[i] * 1.1f + snareCymbal[i] * 0.9f).coerceIn(-1f, 1f) }
-    }
-
-    /**
-     * Generates a real musical multi-harmonic test track (C - G - Am - F progression) when no audio file is provided.
-     */
-    private fun generateSyntheticMasterPcm(numSamples: Int, sampleRate: Int): FloatArray {
-        val pcm = FloatArray(numSamples)
-        val chordsFreqs = listOf(
-            floatArrayOf(261.63f, 329.63f, 392.00f), // C
-            floatArrayOf(196.00f, 246.94f, 293.66f), // G
-            floatArrayOf(220.00f, 261.63f, 329.63f), // Am
-            floatArrayOf(174.61f, 220.00f, 261.63f)  // F
-        )
-        val chordLengthSamples = sampleRate * 2
-
-        for (i in 0 until numSamples) {
-            val chordIdx = (i / chordLengthSamples) % chordsFreqs.size
-            val freqs = chordsFreqs[chordIdx]
-            val t = i.toFloat() / sampleRate
-            
-            var sample = 0f
-            for (f in freqs) {
-                sample += 0.2f * sin(2.0 * Math.PI * f * t).toFloat()
-            }
-            // Add kick beat on every quarter second
-            if ((i % (sampleRate / 2)) < (sampleRate / 20)) {
-                sample += 0.3f * sin(2.0 * Math.PI * 60.0 * t).toFloat()
-            }
-            pcm[i] = sample.coerceIn(-1.0f, 1.0f)
-        }
-        return pcm
     }
 
     // Mixer Control Actions

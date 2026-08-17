@@ -196,102 +196,137 @@ fun SynchronizedPianoKeyboard(activeNotes: List<String>, currentNote: String?) {
         Pair("C#2", 8f), Pair("D#2", 9f), Pair("F#2", 11f)
     )
 
-    val orange = Color(0xFFFF9800)
+    val currentChordRoot = currentNote?.takeWhile { it.isLetter() || it == '#' || it == 'b' }
+    val bassNote = activeNotes.firstOrNull()?.takeWhile { it.isLetter() || it == '#' || it == 'b' } ?: currentChordRoot
 
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(90.dp)
-            .background(Color(0xFF091222), RoundedCornerShape(8.dp))
-            .border(1.dp, Color(0xFF132F52), RoundedCornerShape(8.dp))
-            .padding(4.dp)
-    ) {
-        Row(modifier = Modifier.fillMaxSize()) {
-            whiteKeys.forEach { note ->
-                val isOctave5 = note.endsWith("2")
-                val clean = note.removeSuffix("2")
-                val targetOctave = if (isOctave5) 5 else 4
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        // Role legend header
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("● Bass Note", fontSize = 8.5.sp, fontWeight = FontWeight.Bold, color = Color(0xFF00E5FF))
+                Text("● Chord Tones", fontSize = 8.5.sp, fontWeight = FontWeight.Bold, color = Color(0xFF10B981))
+                Text("● Extensions/Passing", fontSize = 8.5.sp, fontWeight = FontWeight.Bold, color = Color(0xFFA855F7))
+            }
+        }
 
-                val isCurrent = currentNote != null && matchesPianoKey(currentNote, clean, targetOctave, isOctave5)
-                val isActive = activeNotes.any { matchesPianoKey(it, clean, targetOctave, isOctave5) }
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(90.dp)
+                .background(Color(0xFF091222), RoundedCornerShape(8.dp))
+                .border(1.dp, Color(0xFF132F52), RoundedCornerShape(8.dp))
+                .padding(4.dp)
+        ) {
+            Row(modifier = Modifier.fillMaxSize()) {
+                whiteKeys.forEach { note ->
+                    val isOctave5 = note.endsWith("2")
+                    val clean = note.removeSuffix("2")
+                    val targetOctave = if (isOctave5) 5 else 4
 
-                val targetKeyColor = when {
-                    isCurrent -> orange
-                    isActive -> Color(0xFFFEF08A)
-                    else -> Color(0xFFE2E8F0)
+                    val isCurrent = currentNote != null && matchesPianoKey(currentNote, clean, targetOctave, isOctave5)
+                    val isActive = activeNotes.any { matchesPianoKey(it, clean, targetOctave, isOctave5) }
+                    val isBass = clean == bassNote && isActive
+
+                    val targetKeyColor = when {
+                        isBass -> Color(0xFF00E5FF)
+                        isCurrent || (isActive && (clean == currentChordRoot || isPrimaryChordTone(clean, currentNote))) -> Color(0xFF10B981)
+                        isActive -> Color(0xFFA855F7)
+                        else -> Color(0xFFE2E8F0)
+                    }
+
+                    val animatedKeyColor by animateColorAsState(
+                        targetValue = targetKeyColor,
+                        animationSpec = tween(durationMillis = 200),
+                        label = "piano_white_key"
+                    )
+
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxHeight()
+                            .background(animatedKeyColor, RoundedCornerShape(bottomStart = 3.dp, bottomEnd = 3.dp))
+                            .border(0.5.dp, Color(0xFF0F172A), RoundedCornerShape(bottomStart = 3.dp, bottomEnd = 3.dp)),
+                        contentAlignment = Alignment.BottomCenter
+                    ) {
+                        Text(
+                            text = clean,
+                            fontSize = 8.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = if (isCurrent || isActive) Color.Black else Color(0xFF64748B),
+                            modifier = Modifier.padding(bottom = 2.dp)
+                        )
+                    }
                 }
+            }
 
-                val animatedKeyColor by animateColorAsState(
-                    targetValue = targetKeyColor,
-                    animationSpec = tween(durationMillis = 200),
-                    label = "piano_white_key"
-                )
+            BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+                val totalWidth = maxWidth
+                val keyWidth = totalWidth / whiteKeys.size
 
-                Box(
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxHeight()
-                        .background(animatedKeyColor, RoundedCornerShape(bottomStart = 3.dp, bottomEnd = 3.dp))
-                        .border(0.5.dp, Color(0xFF0F172A), RoundedCornerShape(bottomStart = 3.dp, bottomEnd = 3.dp)),
-                    contentAlignment = Alignment.BottomCenter
-                ) {
-                    Text(
-                        text = clean,
-                        fontSize = 8.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = if (isCurrent || isActive) Color.Black else Color(0xFF64748B),
-                        modifier = Modifier.padding(bottom = 2.dp)
+                for (pair in blackKeys) {
+                    val note = pair.first
+                    val pos = pair.second
+                    val isOctave5 = note.endsWith("2")
+                    val clean = note.removeSuffix("2")
+                    val targetOctave = if (isOctave5) 5 else 4
+
+                    val isCurrent = currentNote != null && matchesPianoKey(currentNote, clean, targetOctave, isOctave5)
+                    val isActive = activeNotes.any { matchesPianoKey(it, clean, targetOctave, isOctave5) }
+                    val isBass = clean == bassNote && isActive
+
+                    val targetKeyColor = when {
+                        isBass -> Color(0xFF00E5FF)
+                        isCurrent || (isActive && (clean == currentChordRoot || isPrimaryChordTone(clean, currentNote))) -> Color(0xFF10B981)
+                        isActive -> Color(0xFFA855F7)
+                        else -> Color(0xFF1E293B)
+                    }
+
+                    val animatedKeyColor by animateColorAsState(
+                        targetValue = targetKeyColor,
+                        animationSpec = tween(durationMillis = 200),
+                        label = "piano_black_key"
+                    )
+
+                    val offset = keyWidth * pos - (keyWidth * 0.35f)
+
+                    Box(
+                        modifier = Modifier
+                            .offset(x = offset)
+                            .width(keyWidth * 0.7f)
+                            .height(54.dp)
+                            .background(animatedKeyColor, RoundedCornerShape(bottomStart = 2.dp, bottomEnd = 2.dp))
+                            .border(0.5.dp, Color.Black, RoundedCornerShape(bottomStart = 2.dp, bottomEnd = 2.dp))
                     )
                 }
             }
         }
-
-        BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
-            val totalWidth = maxWidth
-            val keyWidth = totalWidth / whiteKeys.size
-
-            for (pair in blackKeys) {
-                val note = pair.first
-                val pos = pair.second
-                val isOctave5 = note.endsWith("2")
-                val clean = note.removeSuffix("2")
-                val targetOctave = if (isOctave5) 5 else 4
-
-                val isCurrent = currentNote != null && matchesPianoKey(currentNote, clean, targetOctave, isOctave5)
-                val isActive = activeNotes.any { matchesPianoKey(it, clean, targetOctave, isOctave5) }
-
-                val targetKeyColor = when {
-                    isCurrent -> orange
-                    isActive -> Color(0xFFFDE047)
-                    else -> Color(0xFF1E293B)
-                }
-
-                val animatedKeyColor by animateColorAsState(
-                    targetValue = targetKeyColor,
-                    animationSpec = tween(durationMillis = 200),
-                    label = "piano_black_key"
-                )
-
-                val offset = keyWidth * pos - (keyWidth * 0.35f)
-
-                Box(
-                    modifier = Modifier
-                        .offset(x = offset)
-                        .width(keyWidth * 0.7f)
-                        .height(54.dp)
-                        .background(animatedKeyColor, RoundedCornerShape(bottomStart = 2.dp, bottomEnd = 2.dp))
-                        .border(0.5.dp, Color.Black, RoundedCornerShape(bottomStart = 2.dp, bottomEnd = 2.dp))
-                )
-            }
-        }
     }
+}
+
+private fun isPrimaryChordTone(note: String, chordName: String?): Boolean {
+    if (chordName == null) return false
+    val root = chordName.takeWhile { it.isLetter() || it == '#' || it == 'b' }
+    val scale = listOf("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
+    val rootIdx = scale.indexOf(root)
+    if (rootIdx == -1) return false
+    val isMinor = chordName.contains("m") && !chordName.contains("maj", ignoreCase = true)
+    val thirdIdx = (rootIdx + (if (isMinor) 3 else 4)) % 12
+    val fifthIdx = (rootIdx + 7) % 12
+    val thirdNote = scale[thirdIdx]
+    val fifthNote = scale[fifthIdx]
+    return note == root || note == thirdNote || note == fifthNote
 }
 
 @Composable
 fun SynchronizedGuitarFretboard(activeNotes: List<String>, currentNote: String?) {
     val strings = listOf("E4", "B3", "G3", "D3", "A2", "E2")
     val frets = 7
-    val orange = Color(0xFFFF9800)
+    val currentChordRoot = currentNote?.takeWhile { it.isLetter() || it == '#' || it == 'b' }
+    val bassNote = activeNotes.firstOrNull()?.takeWhile { it.isLetter() || it == '#' || it == 'b' } ?: currentChordRoot
 
     Column(
         modifier = Modifier
@@ -299,61 +334,65 @@ fun SynchronizedGuitarFretboard(activeNotes: List<String>, currentNote: String?)
             .background(Color(0xFF140D07), RoundedCornerShape(8.dp))
             .border(1.dp, Color(0xFF422006), RoundedCornerShape(8.dp))
             .padding(8.dp),
-        verticalArrangement = Arrangement.spacedBy(4.dp)
+        verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        strings.forEach { stringNote ->
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = stringNote.take(2),
-                    fontSize = 9.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = Color(0xFFD4AF37),
-                    modifier = Modifier.width(22.dp)
-                )
+        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            strings.forEach { stringNote ->
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = stringNote.take(2),
+                        fontSize = 9.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFFD4AF37),
+                        modifier = Modifier.width(22.dp)
+                    )
 
-                Row(modifier = Modifier.weight(1f)) {
-                    for (fret in 0..frets) {
-                        val noteAtFretWithOctave = getGuitarNoteAt(stringNote, fret)
-                        val cleanNoteName = noteAtFretWithOctave.takeWhile { it.isLetter() || it == '#' || it == 'b' }
-                        val isCurrent = currentNote != null && matchesNoteOrPitch(currentNote, noteAtFretWithOctave)
-                        val isActive = activeNotes.any { matchesNoteOrPitch(it, noteAtFretWithOctave) }
+                    Row(modifier = Modifier.weight(1f)) {
+                        for (fret in 0..frets) {
+                            val noteAtFretWithOctave = getGuitarNoteAt(stringNote, fret)
+                            val cleanNoteName = noteAtFretWithOctave.takeWhile { it.isLetter() || it == '#' || it == 'b' }
+                            val isCurrent = currentNote != null && matchesNoteOrPitch(currentNote, noteAtFretWithOctave)
+                            val isActive = activeNotes.any { matchesNoteOrPitch(it, noteAtFretWithOctave) }
+                            val isBass = cleanNoteName == bassNote && isActive
 
-                        val targetDotColor = when {
-                            isCurrent -> orange
-                            isActive -> Color(0xFFFEF08A)
-                            else -> Color.Transparent
-                        }
+                            val targetDotColor = when {
+                                isBass -> Color(0xFF00E5FF)
+                                isCurrent || (isActive && (cleanNoteName == currentChordRoot || isPrimaryChordTone(cleanNoteName, currentNote))) -> Color(0xFF10B981)
+                                isActive -> Color(0xFFA855F7)
+                                else -> Color.Transparent
+                            }
 
-                        val animatedDotColor by animateColorAsState(
-                            targetValue = targetDotColor,
-                            animationSpec = tween(durationMillis = 200),
-                            label = "guitar_fret_dot"
-                        )
+                            val animatedDotColor by animateColorAsState(
+                                targetValue = targetDotColor,
+                                animationSpec = tween(durationMillis = 200),
+                                label = "guitar_fret_dot"
+                            )
 
-                        Box(
-                            modifier = Modifier
-                                .weight(1f)
-                                .height(16.dp)
-                                .background(Color(0xFF2A1808))
-                                .border(0.5.dp, Color(0xFF78350F)),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            if (animatedDotColor != Color.Transparent) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(12.dp)
-                                        .background(animatedDotColor, CircleShape),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Text(
-                                        text = cleanNoteName,
-                                        fontSize = 7.sp,
-                                        fontWeight = FontWeight.Black,
-                                        color = Color.Black
-                                    )
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(16.dp)
+                                    .background(Color(0xFF2A1808))
+                                    .border(0.5.dp, Color(0xFF78350F)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                if (animatedDotColor != Color.Transparent) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(12.dp)
+                                            .background(animatedDotColor, CircleShape),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(
+                                            text = cleanNoteName,
+                                            fontSize = 7.sp,
+                                            fontWeight = FontWeight.Black,
+                                            color = Color.Black
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -361,6 +400,98 @@ fun SynchronizedGuitarFretboard(activeNotes: List<String>, currentNote: String?)
                 }
             }
         }
+
+        // Guitar Chord Diagram & Fingerings Card
+        GuitarChordDiagramPanel(chordSymbol = currentNote ?: "C")
+    }
+}
+
+data class GuitarVoicingInfo(
+    val chordName: String,
+    val fingerings: String,
+    val frets: List<Int>, // 6 strings E A D G B E, -1 = muted, 0 = open
+    val alternateVoicings: List<String>
+)
+
+private fun getGuitarVoicingReference(chordSymbol: String): GuitarVoicingInfo {
+    val clean = chordSymbol.trim()
+    return when {
+        clean.startsWith("C") && !clean.contains("m") -> GuitarVoicingInfo("C Major", "x 3 2 0 1 0", listOf(-1, 3, 2, 0, 1, 0), listOf("Open C [x32010]", "Barre 8th fret [8-10-10-9-8-8]", "Drop 2 [x3555x]"))
+        clean.startsWith("Am") -> GuitarVoicingInfo("A Minor", "x 0 2 2 1 0", listOf(-1, 0, 2, 2, 1, 0), listOf("Open Am [x02210]", "Barre 5th fret [577555]", "Am7 Shell [5x55xx]"))
+        clean.startsWith("G") && !clean.contains("m") -> GuitarVoicingInfo("G Major", "3 2 0 0 0 3", listOf(3, 2, 0, 0, 0, 3), listOf("Open G [320003]", "Barre 3rd fret [355433]", "G7 Shell [3x34xx]"))
+        clean.startsWith("F") && !clean.contains("m") -> GuitarVoicingInfo("F Major", "1 3 3 2 1 1", listOf(1, 3, 3, 2, 1, 1), listOf("Full Barre [133211]", "Open Fmaj7 [xx3210]", "Thumb-over F [1x321x]"))
+        clean.startsWith("Dm") -> GuitarVoicingInfo("D Minor", "x x 0 2 3 1", listOf(-1, -1, 0, 2, 3, 1), listOf("Open Dm [xx0231]", "Barre 5th fret [x57765]", "Dm7 [xx0211]"))
+        clean.startsWith("Em") -> GuitarVoicingInfo("E Minor", "0 2 2 0 0 0", listOf(0, 2, 2, 0, 0, 0), listOf("Open Em [022000]", "Barre 7th fret [x79987]", "Em7 [020000]"))
+        clean.startsWith("D") && !clean.contains("m") -> GuitarVoicingInfo("D Major", "x x 0 2 3 2", listOf(-1, -1, 0, 2, 3, 2), listOf("Open D [xx0232]", "Barre 5th fret [x57775]", "D7 [xx0212]"))
+        clean.startsWith("A") && !clean.contains("m") -> GuitarVoicingInfo("A Major", "x 0 2 2 2 0", listOf(-1, 0, 2, 2, 2, 0), listOf("Open A [x02220]", "Barre 5th fret [577655]", "A7 [x02020]"))
+        else -> GuitarVoicingInfo(clean, "x 3 2 0 1 0", listOf(-1, 3, 2, 0, 1, 0), listOf("Standard Voicing", "Triad 1st Inversion", "Shell Voicing"))
+    }
+}
+
+@Composable
+fun GuitarChordDiagramPanel(chordSymbol: String) {
+    val voicing = remember(chordSymbol) { getGuitarVoicingReference(chordSymbol) }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Color(0xFF1E1005), RoundedCornerShape(6.dp))
+            .padding(6.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "CHORD DIAGRAM: ${voicing.chordName.uppercase()}",
+                fontSize = 9.sp,
+                fontWeight = FontWeight.Black,
+                color = Color(0xFFF97316)
+            )
+            Text(
+                text = "Fingering: ${voicing.fingerings}",
+                fontSize = 8.5.sp,
+                color = Color(0xFFFEF08A),
+                fontWeight = FontWeight.Medium
+            )
+        }
+
+        // Visual Fret Box
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceEvenly
+        ) {
+            voicing.frets.forEachIndexed { stringIdx, fret ->
+                val stringLabel = listOf("E", "A", "D", "G", "B", "E")[stringIdx]
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(text = stringLabel, fontSize = 7.5.sp, color = Color(0xFFA1A1AA))
+                    Box(
+                        modifier = Modifier
+                            .size(16.dp)
+                            .background(
+                                if (fret > 0) Color(0xFFF97316) else if (fret == 0) Color(0xFF10B981) else Color(0xFF3F3F46),
+                                CircleShape
+                            ),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = if (fret >= 0) "$fret" else "x",
+                            fontSize = 8.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.Black
+                        )
+                    }
+                }
+            }
+        }
+
+        Text(
+            text = "Alternate Voicings: " + voicing.alternateVoicings.joinToString(" • "),
+            fontSize = 8.sp,
+            color = Color(0xFFD4D4D8)
+        )
     }
 }
 
